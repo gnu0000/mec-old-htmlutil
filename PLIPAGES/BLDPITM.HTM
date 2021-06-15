@@ -1,0 +1,2327 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\bldpitm.pli"></A><A NAME="BLDPITM"></A> /*===================================================================*/
+ /*                                                                   */
+ /*   BUILD_PROPITEM : BUILD PROPITEM FILE RECORDS                    */
+ /*                                                                   */
+ /*   ORIGINAL AUTHOR : CJB   01/19/87                                */
+ /*   1.0 CONVERSION  : GNC                                           */
+ /*   2.0 (IBM)       :                                               */
+ /*   2.0 (VAX)       : AAU   03/01/89                                */
+ /*                                                                   */
+ /*------------------ PROGRAM MODIFICATION HISTORY -------------------*/
+ /*                                                                   */
+ /*   UPDATED BY :  CJB  06/07/90                                     */
+ /*                 ADDED CODE TO UPDATE A ALTERNATE FIELDS FOR A     */
+ /*                 PROPITEM SECTION RECORD                           */
+ /*                                                                   */
+ /*                PCGW 02/06/92                                      */
+ /*                (920131-3301) OH.  CHANGED CODE TO BUILD ADDITEM   */
+ /*                LIST AND INSERT IN ORDER.  FIXED TO RECOGNIZE      */
+ /*                MORE THAN 1 CHANGE ADDITEM BUT NOT MORE THAN ONE   */
+ /*                ADD OR DELETE ADDITEM.  NOW THE LIST WILL BUILD    */
+ /*                CORRECTLY AND IT WILL PROCESS ADDITEMS CORRECTLY.  */
+ /*                                                                   */
+ /*                PCGW 02/11/92                                      */
+ /*                (920211-3301) KS.  FIXED CODE TO SOLVE THE ROUND-  */
+ /*                ING PROBLEM ON THE BID PRICE.  THE PROBLEM WAS     */
+ /*                DISCOVERED IN LASGBTA.  PROBABLY ALSO IN PESGPPS.  */
+ /*                                                                   */
+ /*                CJB  08/07/92  BSR 920730-3201                     */
+ /*                ADDED ROUNDING TO EXTENDED AMOUNT CALCS.           */
+ /*                                                                   */
+ /*                                                                   */
+ /*                SC   09/21/93                                      */
+ /*                (BSR 930073). MODIFIED THE CODE IN PROCESS_ADDENDUM*/
+ /*                _ITEMS, DELETE OPTION TO HANDLE THE SITUATION      */
+ /*                WHERE THE FIRST ADDENDUM ITEM IS THE ONE TO BE     */
+ /*                DELETED.                                           */
+ /*                                                                   */
+ /*                SC   10/26/93                                      */
+ /*                BSR 930021, ADDED CODE TO PROCESS THE '*' OPTION   */
+ /*                                                                   */
+ /*                PCGW 03/17/94                                      */
+ /*                (940060) CO.  FIXED CODE TO HANDLE CALCULATING THE */
+ /*                PRICE OF ITEMS WHEN THEY ARE COMBINED OVER 3 OR    */
+ /*                MORE PROJECTS.  NOT DUPLICATED IN HOUSE.           */
+ /*                                                                   */
+ /*                CJB 08/23/95                                       */
+ /*                ADDED IN CODE FOR 2ND SUPP DESC FIELD.             */
+ /*                                                                   */
+ /*                PCGW 01/24/96                                      */
+ /*                (960049) GA.                                       */
+ /*                CHANGED CODE IN BUILD_ADDITEM_LIST TO NOT ALLOCATE */
+ /*                A NEW ADDITEM NODE IF THE ACTION IS 'C' BUT TO     */
+ /*                UPDATE THE CURRENT ADDITEM NODE WITH THE NEW       */
+ /*                VALUES.                                            */
+ /*                                                                   */
+ /*                RTD  03/19/96                                      */
+ /*                OPTIMIZED BUILD_ESTITEM_LIST BY MINIMIZING NESTED  */
+ /*                READ LOOPS.                                        */
+ /*                                                                   */
+ /*                CMR  06/16/96                                      */
+ /*                USE A FULL-KEY READ ON THE 'P' PROPITEM RECORD TO  */
+ /*                DETERMINE IF PROPITEMS EXIST.  THIS SAVES UNNECES- */
+ /*                ARY CPU USAGE IN BUILDING A CURSOR WHEN NO RECORDS */
+ /*                EXIST TO SATISFY THE REQUEST.  IT CAN TAKE AS MUCH */
+ /*                AS 10 CPU SECONDS TO DETERMINE THAT NO RECORDS     */
+ /*                EXIST.  ADDED DECLARE STATEMENTS FOR LINEFLAG AND  */
+ /*                IPLINENO TO AVOID AMBIGUOUS REFERENCE.             */
+ /*                                                                   */
+ /*                PJP 05/31/96                                       */
+ /*                ADDED CHECK OF ENVIRONMENT VARIABLE PREPROC$OPSYS, */
+ /*                IF DB2 OR OS2, THEN SET SQLOC PL/I VARIABLE TO 'OC'*/
+ /*                (OPEN CURSOR) OPTION USED SEQUENTIAL READS.  IF NOT*/
+ /*                DB2 OR OS2 SET TO BLANK.                           */
+ /*                                                                   */
+ /*                CJB 06/19/96                                       */
+ /*                ADDED '0' KEYLEVEL TO 'GE' READS TO ASSIST WITH    */
+ /*                FASTER ACCESS IN DB2.                              */
+ /*===================================================================*/
+     
+ <A HREF="bldpitm.htm#BLDPITM">BLDPITM</A>:  PROC OPTIONS (MAIN);
+     
+   %INCLUDE BENVSTP;
+   %INIT_TYPE = 'INTEGRATED ';
+   %INCLUDE BTCSTUP;
+     
+   SHELL$MODULE_NAME    = '<A HREF="bldpitm.htm#BLDPITM">BLDPITM</A>';
+   SHELL$MODULE_SEGMENT = 'SETUP';
+     
+   ITRC = ITSET ('LOCK','FATAL');
+   ITRC = ITSET ('TNF' ,'FATAL');
+     
+   %INCLUDE PROJECT;
+   %INCLUDE PROPPROJ;
+   %INCLUDE ESTITEM;
+   %INCLUDE ESTCATG;
+   %INCLUDE ITEMLIST;
+   %INCLUDE ADDITEM;
+   %INCLUDE PROPITEM;
+   %INCLUDE PROPOSAL;
+   %INCLUDE LETPROP;
+   %INCLUDE BIDLET;
+     
+   DCL (ESTITEM_TOP, ESTITEM_END, EI, P, T,
+        PROPITEM_TOP, PROPITEM_END, PI)             POINTER,
+        STATE_SUPPLIED                              CHAR(1),
+        CONTID                                      CHAR(15),
+        IPLINENO                                    CHAR(4),
+        LINEFLAG                                    CHAR(1),
+        PCN                                         CHAR(13),
+        SUBSET                              CHAR(8) INIT ('SUBSET'),
+        CN                                          CHAR(4),
+        SPECYR                                      CHAR(2),
+        ITEM                                        CHAR(13),
+       (PROJECT_FOUND, PROPPROJ_FOUND,
+        ESTCATG_FOUND, ESTITEM_FOUND,
+        PROPITEM_FOUND, ITEMLIST_FOUND,
+        ADDITEM_FOUND, OVERFLOW, FOUND,
+        LETPROP_FOUND)                               BIT (1),
+       (QUANTITY, TOTAL_QUANTITY)                    FIXED DEC (12,3),
+       (EXTENDED_PRICE, 
+        TEMP_PRICE)                                  FIXED DEC (13,5),
+        PARM_BUFFER                                  CHAR (80) VARYING,
+        ABORT                                        BIT (1),
+       (EOF,PROPOSAL_FILE_FLAG)                      BIT(1) INIT('0'B),
+       SUBSET_FOUND                                  BIT(1) INIT('0'B),
+       SUBSET_OPEN                                   BIT(1) INIT('0'B);
+     
+   DCL PARM_FILE                                     FILE,
+       USE_TEMPORARY_PROPITEM                        BIT (1);
+     
+   OPEN FILE (PARM_FILE)
+        RECORD SEQUENTIAL INPUT;
+     
+   ESTITEM_TOP  = NULL;
+   ESTITEM_END  = NULL;
+   PROPITEM_TOP = NULL;
+   PROPITEM_END = NULL;
+     
+   /*--- IALT ITEM ALTERNATE LIST NODE DECLARATION ---*/
+   DCL (IALT_TOP, IALT_END)  POINTER;
+   DCL 1 IALT_NODE         BASED,
+         2 IALT            CHAR (3),
+         2 COST            FIXED DEC (11,2),
+         2 LOWCOST         BIT (1),
+         2 NEXT_PTR        POINTER;
+     
+   /*--- CNALT CATEGORY ALTERNATE LIST NODE DECLARATION ---*/
+   DCL (CNALT_TOP, CNALT_END)  POINTER;
+   DCL 1 CNALT_NODE        BASED,
+         2 CNALT           CHAR (3),
+         2 COST            FIXED DEC (11,2),
+         2 LOWCOST         BIT (1),
+         2 NEXT_PTR        POINTER;
+     
+   /*--- ESTIMATE ITEM LIST NODE ---*/
+   DCL 1 ESTITEM_NODE  BASED,
+         2 PCN         CHAR (13),
+         2 CN          CHAR (4),
+         2 IELINENO    CHAR (4),
+         2 SECTION     CHAR (4),
+         2 CNALT       CHAR (3),
+         2 LINE        CHAR (4),
+         2 ITEM        CHAR (13),
+         2 IALT        CHAR (3),
+         2 UNIT        CHAR (4),
+         2 UNITLS      CHAR (4),
+         2 QTY         CHAR (13),
+         2 PRICE       CHAR (14),
+         2 LUMPSUM     BIT  (1),
+         2 HYB_LUMPSUM BIT  (1),
+         2 INONPAR     CHAR (6),
+         2 SUPDES      CHAR (40),
+         2 FIXED_FLG   CHAR (1),
+         2 PRICER      CHAR (14),
+         2 NEXT_PTR    POINTER,
+         2 IPRPDES     CHAR (40),
+         2 SUPDES2     CHAR (40);
+     
+   /*--- PROPOSAL ITEM LIST NODE ---*/
+   DCL 1 PROPITEM_NODE BASED,
+         2 PCN         CHAR (13),
+         2 CN          CHAR (4),
+         2 SECTION     CHAR (4),
+         2 LINE        CHAR (4),
+         2 ITEM        CHAR (13),
+         2 IALT        CHAR (3),
+         2 CNALT       CHAR (3),
+         2 UNITLS      CHAR (4),
+         2 UNIT        CHAR (4),
+         2 NQTY        FIXED DEC (12,3),
+         2 NPRICE      FIXED DEC (13,5),
+         2 QTY         CHAR (13),
+         2 PRICE       CHAR (14),
+         2 LUMPSUM     BIT   (1),
+         2 HYB_LUMPSUM BIT   (1),
+         2 EXTAMT      CHAR (12),
+         2 NEXTAMT     FIXED DEC (11,2),
+         2 LOWCOST     BIT (1),
+         2 SUPDES      CHAR (40),
+         2 FIXED_FLG   CHAR (1),
+         2 DIVIDEP     BIT (1),     /* ADDED PCGW */
+         2 NEXT_PTR    POINTER,
+         2 PIPRPDES    CHAR (40),
+         2 SUPDES2     CHAR (40);
+     
+   /*--- SECTION LIST NODE ---*/
+   DCL (S,SECTION_TOP,SECTION_END)       POINTER;
+   DCL 1 SECTION_NODE        BASED,
+         2 SECTION           CHAR (4),
+         2 EXTAMT            CHAR (12),
+         2 NEXTAMT           FIXED DEC (11,2),
+         2 IALT              CHAR (4),
+         2 CNALT             CHAR (4),
+         2 HAS_IALT          BIT (1),
+         2 HAS_NON_IALT      BIT (1),
+         2 NEXT_PTR          POINTER;
+     
+   /*---- ADDITEM LIST NODE ---*/
+   DCL ADDITEM_NODE_KEY      CHAR (22);
+   DCL (A,ADDITEM_TOP,ADDITEM_END)      POINTER;
+   DCL 1 ADDITEM_NODE        BASED,
+         2 KEY               CHAR (22),
+         2 KEY_FIELDS,
+             3 PCN           CHAR (13),
+             3 CN            CHAR (4),
+             3 ACTION        CHAR (1),
+             3 IELINENO      CHAR (4),
+         2 IPLINENO          CHAR (4),
+         2 ITEM              CHAR (13),
+         2 IALT              CHAR (3),
+         2 INONPAR           CHAR (6),
+         2 ISTATE            CHAR (1),
+         2 IPRICE            CHAR (14),
+         2 IQTY              CHAR (13),
+         2 IFIXED            CHAR (1),
+         2 ISUPDES           CHAR (40),
+         2 IPRICER           CHAR (14),
+         2 ISUPDES2          CHAR (40),
+         2 NEXT_PTR          POINTER;
+
+   /*-- MISCELLANEOUS GLOBAL VARIABLES --*/
+   DCL   SQLOC               CHAR (2);  
+   
+   /* IF ENVIRONMENT = DB2 OR OS2 THEN SET SQLOC TO 'OC' */
+   /* (OPEN CURSOR).  5/28/96, PJP                       */
+   %IF PREPROC$OPSYS = 'DB2' | PREPROC$OPSYS = 'OS2'
+      %THEN %DO;
+         SQLOC = 'OC';
+      %END;
+      %ELSE %DO;
+         SQLOC = '';
+      %END;
+
+   ADDITEM_TOP = NULL;
+   ADDITEM_END = NULL;
+     
+     
+     
+   PROPPROJ_RECORD_PTR = ADDR(PROPPROJ_RECORD);
+   ITRC = ITOPEN ('PROPPROJ', PROPPROJ_RECORD_PTR, 'READ',
+                  '', '', '');
+     
+   PROJECT_RECORD_PTR = ADDR(PROJECT_RECORD);
+   ITRC = ITOPEN ('PROJECT ', PROJECT_RECORD_PTR, 'READ',
+                 '','','');
+     
+   ESTCATG_RECORD_PTR = ADDR(ESTCATG_RECORD);
+   ITRC = ITOPEN ('ESTCATG ', ESTCATG_RECORD_PTR, 'READ',
+                 '','','');
+     
+   ESTITEM_RECORD_PTR = ADDR(ESTITEM_RECORD);
+   ITRC = ITOPEN ('ESTITEM ', ESTITEM_RECORD_PTR, 'READ',
+                  '', '', '');
+   ITEMLIST_RECORD_PTR = ADDR(ITEMLIST_RECORD);
+   ITRC = ITOPEN ('ITEMLIST', ITEMLIST_RECORD_PTR, 'READ',
+                  '', '', 'CACHE');
+     
+   ADDITEM_RECORD_PTR = ADDR(ADDITEM_RECORD);
+   ITRC = ITOPEN ('ADDITEM ', ADDITEM_RECORD_PTR, 'READ',
+                  '', '', '');
+     
+   READ FILE (PARM_FILE)
+        INTO (PARM_BUFFER);
+     
+   IF INDEX(PARM_BUFFER, 'TEMPORARY') ^= 0
+      THEN USE_TEMPORARY_PROPITEM = '1'B;
+      ELSE USE_TEMPORARY_PROPITEM = '0'B;
+     
+   PROPITEM_RECORD_PTR = ADDR(PROPITEM_RECORD);
+   IF USE_TEMPORARY_PROPITEM
+      THEN DO;
+         ITRC = ITOPEN ('PROPITEM', PROPITEM_RECORD_PTR, 'WRITE',
+                       '', '', 'LIBRARY=TEMPTABL');
+         IF ITRC ^= 0
+            THEN CALL FATAL_ERROR ('PROGRAM',
+                      'UNABLE TO CREATE TEMPORARY PROPITEM TABLE');
+      END;
+      ELSE DO; /* OPEN PERMANENT PROPITEM TABLE */
+         ITRC = ITOPEN ('PROPITEM', PROPITEM_RECORD_PTR, 'WRITE',
+                       '', '', 'LIBRARY=PESTABL');
+         IF ITRC = 12
+            THEN CALL FATAL_ERROR ('PROGRAM','PROPITEM TABLE LOCKED');
+            ELSE IF ITRC &gt 12
+                   THEN CALL FATAL_ERROR ('PROPGRAM',
+                    'UNABLE TO CREATE/OPEN PERMANENT PROPITEM TABLE');
+      END;
+     
+     
+     
+   READ FILE (PARM_FILE)
+        INTO (PARM_BUFFER);
+     
+   CLOSE FILE (PARM_FILE);
+   SELECT;
+     WHEN (INDEX(PARM_BUFFER,'PROPOSAL_FILE') ^= 0)
+           GOTO PROPOSAL_FILE_PROCESSING;
+     WHEN (INDEX(PARM_BUFFER,'LETPROP_FILE') ^= 0)
+           GOTO LETPROP_FILE_PROCESSING;
+     WHEN (INDEX(PARM_BUFFER,'BIDLET_FILE') ^= 0)
+           GOTO BIDLET_FILE_PROCESSING;
+     OTHERWISE CALL FATAL_ERROR ('PROGRAM','INVALID SUBSET_FILEID');
+   END;
+     
+     
+   PROPOSAL_FILE_PROCESSING:
+     
+   PROPOSAL_RECORD_PTR = ADDR(PROPOSAL_RECORD);
+   CALL LOAD_SUBSET ('PROPOSAL',PROPOSAL_RECORD_PTR);
+
+    /*--------- THE FOLLOWING LOGIC ADDED TO PROCESS -------------*/
+    /*--------- THE '*' OPTION                       -------------*/
+    /*              SC - 10/22/93                                 */
+
+   
+   ITRC = ITOPEN (SUBSET, PROPOSAL_RECORD_PTR, 'READ', '', '',
+                          'LIBRARY=TEMPTABL');
+   SUBSET_FOUND = '1'B;
+   SUBSET_OPEN = '1'B;
+
+   ITRC = ITREAD (SUBSET, '', '', '');
+   IF (ITRC = 8)
+     THEN SUBSET_FOUND = '0'B;
+   
+   IF (ITRC = 0)
+      THEN DO;
+
+        IF (SUBSTR(PROPOSAL_RECORD.CONTID, 1,1) = '*')
+          THEN DO;
+            ITRC = ITCLOSE (SUBSET, 'LIBRARY=TEMPTABL');
+            SUBSET_OPEN = '0'B;
+            SUBSET = 'PROPOSAL';
+            ITRC = ITOPEN (SUBSET, PROPOSAL_RECORD_PTR, 'READ',
+                           '', '', '');
+            SUBSET_OPEN = '1'B;
+            ITRC = ITREAD (SUBSET, '', '', '');
+            IF (ITRC = 8) THEN
+              SUBSET_FOUND = '0'B;
+          END;
+   END;  
+    
+   DO WHILE (^EOF);
+      CONTID = PROPOSAL_RECORD.CONTID;
+      CALL PROCESS_RECORDS;
+      ITRC = ITREAD (SUBSET  ,'','','');
+      IF ITRC = 8
+         THEN EOF = '1'B;
+   END;
+   
+   GOTO FINISHED_PROCESSING;
+     
+   LETPROP_FILE_PROCESSING:
+     
+   LETPROP_RECORD_PTR = ADDR(LETPROP_RECORD);
+   CALL LOAD_SUBSET ('LETPROP ',LETPROP_RECORD_PTR);
+     
+   ITRC = ITOPEN (SUBSET,LETPROP_RECORD_PTR,'READ','','',
+                'LIBRARY=TEMPTABL');
+     
+   ITRC = ITREAD (SUBSET,'','','');
+   IF ITRC = 8
+      THEN EOF = '1'B;
+     
+   DO WHILE (^EOF);
+     
+      CONTID = LETPROP_RECORD.LCONTID;
+     
+      CALL PROCESS_RECORDS;
+     
+      ITRC = ITREAD (SUBSET,'','','');
+<A NAME="PROCESS_RECORDS"></A>      IF ITRC = 8
+         THEN EOF = '1'B;
+   END;
+     
+   GOTO FINISHED_PROCESSING;
+     
+   BIDLET_FILE_PROCESSING:
+     
+     
+   LETPROP_RECORD_PTR = ADDR(LETPROP_RECORD);
+   ITRC = ITOPEN ('LETPROP ', LETPROP_RECORD_PTR, 'READ',
+                 '', '', '');
+     
+   BIDLET_RECORD_PTR = ADDR(BIDLET_RECORD);
+   CALL LOAD_SUBSET ('BIDLET  ',BIDLET_RECORD_PTR);
+     
+   ITRC = ITOPEN (SUBSET,BIDLET_RECORD_PTR,'READ','','',
+                'LIBRARY=TEMPTABL');
+     
+   ITRC = ITREAD (SUBSET,'','','');
+   IF ITRC = 8
+      THEN EOF = '1'B;
+     
+   LETPROP_FOUND = '1'B;
+   RECORD_LOCKED = '0'B;
+<A NAME="BUILD_ESTIMATE_ITEM_LIST"></A>   LETPROP_KEY   = BIDLET_RECORD.LETTING;
+     
+     
+   ITRC = ITREAD ('LETPROP ',LETPROP_KEY,'0','GE');
+   IF ITRC = 8
+      THEN LETPROP_FOUND = '0'B;
+     
+   DO WHILE (LETPROP_FOUND &amp
+             LETPROP_RECORD.LETTING = BIDLET_RECORD.LETTING);
+     
+      CONTID = LETPROP_RECORD.LCONTID;
+     
+      CALL PROCESS_RECORDS;
+     
+      ITRC = ITREAD ('LETPROP ','','',SQLOC);
+      IF ITRC = 8
+         THEN LETPROP_FOUND = '0'B;
+   END;
+     
+   ITRC = ITCLOSE ('LETPROP ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('LETPROP TABLE NOT OPEN');
+     
+   FINISHED_PROCESSING:
+     
+   ITRC = ITCLOSE (SUBSET,'LIBRARY=TEMPTABL');
+     
+   IF USE_TEMPORARY_PROPITEM
+      THEN ITRC = ITCLOSE ('PROPITEM','LIBRARY=TEMPTABL');
+      ELSE ITRC = ITCLOSE ('PROPITEM','LIBRARY=PESTABL');
+     
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('PROPITEM TABLE NOT OPEN');
+   ITRC = ITCLOSE ('PROPPROJ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('PROPPROJ TABLE NOT OPEN');
+     
+   ITRC = ITCLOSE ('PROJECT ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('PROJECT  TABLE NOT OPEN');
+     
+   ITRC = ITCLOSE ('ESTCATG ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('ESTCATG  TABLE NOT OPEN');
+     
+   ITRC = ITCLOSE ('ESTITEM ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('ESTITEM  TABLE NOT OPEN');
+     
+   ITRC = ITCLOSE ('ITEMLIST','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('ITEMLIST TABLE NOT OPEN');
+   ITRC = ITCLOSE ('ADDITEM ','');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('ADDITEM  TABLE NOT OPEN');
+     
+ /*-------------------------------------------------------------------*/
+ /*                PROCESS RECORDS                                    */
+ /*-------------------------------------------------------------------*/
+ PROCESS_RECORDS: PROC;
+     
+    DCL SAVE_SEGMENT     CHAR (31);
+     
+    SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+    SHELL$MODULE_SEGMENT = 'PROCESS_RECORDS';
+ 
+    ABORT = '0'B;
+     
+    CALL BUILD_ESTIMATE_ITEM_LIST;
+     
+    CALL PROCESS_ADDENDUM_ITEMS;
+
+    IF ^ABORT
+       THEN CALL BUILD_PROPOSAL_ITEM_LIST;
+
+    IF ^ABORT
+        THEN CALL FREE_ITEM_AND_ALT_LISTS;
+    
+    SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END PROCESS_RECORDS;
+     
+ /*-------------------------------------------------------------------*/
+ /*                  BUILD ESTIMATE ITEM LIST                         */
+ /*-------------------------------------------------------------------*/
+ BUILD_ESTIMATE_ITEM_LIST: PROC;
+     
+   DCL PROJECT_SPECYEAR     CHAR(2),
+       SAVE_SEGMENT          CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_ESTIMATE_ITEM_LIST';
+   
+   /*--- BUILD LIST OF ESTIMATE ITEMS FOR PROJECTS IN PROPOSAL ---*/
+     
+   /*--- GET PROJECTS FOR CONTRACT ---*/
+   PROPPROJ_FOUND = '1'B;
+   RECORD_LOCKED  = '0'B;
+     
+   PROPPROJ_KEY = CONTID;
+   ITRC = ITREAD ('PROPPROJ',PROPPROJ_KEY,'0','GE');
+   IF ITRC = 8
+      THEN PROPPROJ_FOUND = '0'B;
+     
+   DO WHILE (PROPPROJ_FOUND &amp PROPPROJ_RECORD.CONTID = CONTID);
+
+      PCN = PROPPROJ_RECORD.PCN;
+      RECORD_LOCKED = '0'B;
+     
+      ITRC = ITREAD ('PROJECT ',PCN,'0','');
+      IF ITRC = 8
+         THEN CALL FATAL_ERROR ('PROGRAM','PROJECT NOT FOUND ' ||
+                             'PCN = ' || PCN || 'FROM PROPPROJ');
+
+      PROJECT_SPECYEAR = PROJECT_RECORD.PSPECYR;
+
+     
+      /*--- GET ITEMS FOR PROJECT ---*/
+      RECORD_LOCKED = '0'B;
+      ESTITEM_FOUND = '1'B;
+           
+      ESTITEM_KEY = PCN;
+      ITRC = ITREAD ('ESTITEM ',ESTITEM_KEY,'0','GE');
+      IF ITRC = 8
+         THEN ESTITEM_FOUND = '0'B;
+
+      CN = ' ';
+     
+      DO WHILE (ESTITEM_FOUND &amp ESTITEM_RECORD.PCN = PCN);
+     
+         IF ESTITEM_RECORD.CN ^= CN
+            THEN DO;
+              CN = ESTITEM_RECORD.CN;
+              ESTCATG_KEY = PCN || ESTITEM_RECORD.CN;
+              ITRC = ITREAD ('ESTCATG ',ESTCATG_KEY,'0',' ');
+            END;
+     
+         STATE_SUPPLIED = ESTITEM_RECORD.ISTATE;
+     
+<A NAME="BUILD_ADDITEM_LIST"></A>         IF STATE_SUPPLIED = 'Y'
+            THEN GOTO SKIP_STATE_SUPPLIED_ITEM;
+     
+         ITEM = ESTITEM_RECORD.EIITEM;
+  
+         /*--- GET UNITS AND LUMP SUM UNITS FOR ITEMS ---*/
+         ITRC = ITREAD ('ITEMLIST',ITEM||PROJECT_SPECYEAR,'0','');
+         IF ITRC = 8
+            THEN ITEMLIST_FOUND = '0'B;
+
+         ALLOCATE ESTITEM_NODE SET (EI);
+     
+         EI -&gt ESTITEM_NODE.PCN       = PCN;
+         EI -&gt ESTITEM_NODE.CN        = CN;
+         EI -&gt ESTITEM_NODE.IELINENO  = ESTITEM_RECORD.ILINENO;
+         EI -&gt ESTITEM_NODE.SECTION   = ESTCATG_RECORD.CSECNUM;
+         EI -&gt ESTITEM_NODE.LINE      = ESTITEM_RECORD.IPLINENO;
+         EI -&gt ESTITEM_NODE.QTY       = ESTITEM_RECORD.IQTY;
+         EI -&gt ESTITEM_NODE.PRICE     = ESTITEM_RECORD.IPRICE;
+         EI -&gt ESTITEM_NODE.ITEM      = ESTITEM_RECORD.EIITEM;
+         EI -&gt ESTITEM_NODE.UNIT      = ITEMLIST_RECORD.IUNITS;
+         EI -&gt ESTITEM_NODE.INONPAR   = ESTITEM_RECORD.INONPAR;
+         EI -&gt ESTITEM_NODE.UNITLS    = ITEMLIST_RECORD.IUNITSLS;
+         EI -&gt ESTITEM_NODE.IALT      = ESTITEM_RECORD.IALT;
+         EI -&gt ESTITEM_NODE.CNALT     = ESTCATG_RECORD.CNALT;
+         EI -&gt ESTITEM_NODE.SUPDES    = ESTITEM_RECORD.ISUPDES;
+         EI -&gt ESTITEM_NODE.FIXED_FLG = ESTITEM_RECORD.IFIXED;
+         EI -&gt ESTITEM_NODE.PRICER    = ESTITEM_RECORD.IPRICER;
+         EI -&gt ESTITEM_NODE.IPRPDES   = ESTITEM_RECORD.IPRPDES;
+         EI -&gt ESTITEM_NODE.SUPDES2   = ESTITEM_RECORD.ISUPDES2;
+   
+         EI -&gt ESTITEM_NODE.NEXT_PTR = NULL;
+     
+         IF EI -&gt ESTITEM_NODE.UNIT = 'LS  ' &amp
+            EI -&gt ESTITEM_NODE.UNITLS = '    '
+              THEN EI -&gt ESTITEM_NODE.LUMPSUM = '1'B;
+              ELSE EI -&gt ESTITEM_NODE.LUMPSUM = '0'B;
+     
+         IF EI -&gt ESTITEM_NODE.UNIT = 'LS  ' &amp
+            EI -&gt ESTITEM_NODE.UNITLS ^= '    '
+              THEN EI -&gt ESTITEM_NODE.HYB_LUMPSUM = '1'B;
+              ELSE EI -&gt ESTITEM_NODE.HYB_LUMPSUM = '0'B;
+     
+         IF ESTITEM_TOP = NULL
+            THEN ESTITEM_TOP = EI;
+            ELSE ESTITEM_END -&gt ESTITEM_NODE.NEXT_PTR = EI;
+         ESTITEM_END = EI;
+     
+         SKIP_STATE_SUPPLIED_ITEM:
+     
+         ITRC = ITREAD ('ESTITEM ','','',SQLOC);
+         IF ITRC = 8
+            THEN ESTITEM_FOUND = '0'B;
+     
+      END; /* ESTITEM LEVEL */
+     
+     
+      /*--- ALL ITEMS FOR ALL CATEGORIES FOR A PROJECT FOR     ---*/
+      /*--- A PROPOSAL ARE ON ESTIMATE ITEM LIST AT THIS POINT ---*/
+     
+      CALL BUILD_ADDITEM_LIST;
+     
+     /*--- NEXT PROPPROJ IS USED FOR NON FATAL RECORD LOCKS ---*/
+     NEXT_PROPPROJ:
+     
+      ITRC = ITREAD ('PROPPROJ','','',SQLOC);
+      IF ITRC = 8
+         THEN PROPPROJ_FOUND = '0'B;
+     
+   END; /* PROPPROJ LEVEL */
+     
+   /*--- NO ESTIMATE ITEMS OR ADDITEMS FOR PROJECTS FOR PROPOSAL ---*/
+   IF ESTITEM_TOP = NULL
+      THEN DO;
+        ABORT = '1'B;
+        /* MEA MODIFIED TO PRINT OUT PROPOSAL ID */
+        CALL NON_FATAL_ERROR ('NO ITEMS FOR PROPOSAL ' || CONTID);
+      END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+   
+ END BUILD_ESTIMATE_ITEM_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                     BUILD_ADDITEM_LIST                            */
+ /*-------------------------------------------------------------------*/
+ BUILD_ADDITEM_LIST:  PROC;           /*ADDED NEXT_PTR 2/6/92 PCGW*/
+     
+   DCL SAVE_SEGMENT         CHAR (31),
+       PREV_PTR             POINTER,    /* POINTER TO PREVIOUS NODE */
+       NEXT_PTR             POINTER,    /* POINTER TO NEXT NODE     */
+       LOC_PTR              POINTER; /* POINTER TO INSERTION POSITION */
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_ADDITEM_LIST';
+     
+    /*--- GET ADDITEMS FOR PROJECT AND PLACE ON ADDITEM LIST ---*/
+     
+    RECORD_LOCKED = '0'B;
+    ADDITEM_FOUND = '1'B;
+    ITRC = ITREAD ('ADDITEM ',PCN,'1','GE');
+     
+    IF ITRC = 8
+       THEN ADDITEM_FOUND = '0'B;
+     
+   DO WHILE (ADDITEM_FOUND &amp ADDITEM_RECORD.PCN = PCN);
+     
+      A = ADDITEM_TOP;
+      FOUND = '0'B;
+      DO WHILE (A ^= NULL &amp ^FOUND);
+     
+         IF A -&gt ADDITEM_NODE.PCN      = ADDITEM_RECORD.PCN      &amp
+            A -&gt ADDITEM_NODE.CN       = ADDITEM_RECORD.CN       &amp
+            A -&gt ADDITEM_NODE.IELINENO = ADDITEM_RECORD.ILINENO &amp
+            A -&gt ADDITEM_NODE.ACTION   = ADDITEM_RECORD.ACTION
+            THEN FOUND = '1'B;
+            ELSE A = A -&gt ADDITEM_NODE.NEXT_PTR;
+     
+      END;
+     
+      IF (FOUND &amp (ADDITEM_RECORD.ACTION ^= 'C'))
+         THEN GOTO NEXT_ADDITEM;
+     /*  CHANGED THIS BECAUSE YOU CAN HAVE MORE THAN ONE
+         CHANGE.  ONLY IF ADD OR DELETE DO YOU NOT WANT
+         MORE THAN ONE ADDITEM.       2/6/92 PCGW       */
+     
+     /* CHANGED THIS SO THAT IF THE ACTION IS 'C', THEN
+        UPDATE THE CURRENT ADDITEM NODE WITH THE NEW
+        VALUES.  ELSE, DO THE ALLOCATE, INSERT, ETC.
+        BSR 960049  1/24/96 PCGW                        */
+      IF (FOUND &amp (ADDITEM_RECORD.ACTION = 'C')) THEN
+         DO;
+           A -&gt ADDITEM_NODE.PCN      = ADDITEM_RECORD.PCN;
+           A -&gt ADDITEM_NODE.CN       = ADDITEM_RECORD.CN;
+           A -&gt ADDITEM_NODE.IELINENO = ADDITEM_RECORD.ILINENO;
+           A -&gt ADDITEM_NODE.ACTION   = ADDITEM_RECORD.ACTION;
+           A -&gt ADDITEM_NODE.IPLINENO = ADDITEM_RECORD.APLINENO;
+           A -&gt ADDITEM_NODE.ITEM     = ADDITEM_RECORD.ADITEM;
+           A -&gt ADDITEM_NODE.IALT     = ADDITEM_RECORD.AIALT;
+           A -&gt ADDITEM_NODE.INONPAR  = ADDITEM_RECORD.ANONPAR;
+           A -&gt ADDITEM_NODE.ISTATE   = ADDITEM_RECORD.AISTATE;
+           A -&gt ADDITEM_NODE.IPRICE   = ADDITEM_RECORD.APRICE;
+           A -&gt ADDITEM_NODE.IQTY     = ADDITEM_RECORD.AQTY;
+           A -&gt ADDITEM_NODE.IFIXED   = ADDITEM_RECORD.AFIXED;
+           A -&gt ADDITEM_NODE.ISUPDES  = ADDITEM_RECORD.ASUPDES;
+           A -&gt ADDITEM_NODE.IPRICER  = ADDITEM_RECORD.APRICER;
+           A -&gt ADDITEM_NODE.ISUPDES2 = ADDITEM_RECORD.ASUPDES2;
+         END;   /* ADDITEM.ACTION = C */
+
+      ELSE DO;
+
+      ALLOCATE ADDITEM_NODE SET (A);
+     
+      A -&gt ADDITEM_NODE.PCN      = ADDITEM_RECORD.PCN;
+      A -&gt ADDITEM_NODE.CN       = ADDITEM_RECORD.CN;
+      A -&gt ADDITEM_NODE.IELINENO = ADDITEM_RECORD.ILINENO;
+      A -&gt ADDITEM_NODE.ACTION   = ADDITEM_RECORD.ACTION;
+      A -&gt ADDITEM_NODE.IPLINENO = ADDITEM_RECORD.APLINENO;
+      A -&gt ADDITEM_NODE.ITEM     = ADDITEM_RECORD.ADITEM;
+      A -&gt ADDITEM_NODE.IALT     = ADDITEM_RECORD.AIALT;
+      A -&gt ADDITEM_NODE.INONPAR  = ADDITEM_RECORD.ANONPAR;
+      A -&gt ADDITEM_NODE.ISTATE   = ADDITEM_RECORD.AISTATE;
+      A -&gt ADDITEM_NODE.IPRICE   = ADDITEM_RECORD.APRICE;
+      A -&gt ADDITEM_NODE.IQTY     = ADDITEM_RECORD.AQTY;
+      A -&gt ADDITEM_NODE.IFIXED   = ADDITEM_RECORD.AFIXED;
+      A -&gt ADDITEM_NODE.ISUPDES  = ADDITEM_RECORD.ASUPDES;
+<A NAME="PROCESS_ADDENDUM_ITEMS"></A>      A -&gt ADDITEM_NODE.IPRICER  = ADDITEM_RECORD.APRICER;
+      A -&gt ADDITEM_NODE.ISUPDES2 = ADDITEM_RECORD.ASUPDES2;
+      A -&gt ADDITEM_NODE.NEXT_PTR = NULL;
+     
+      IF ADDITEM_TOP = NULL
+         THEN DO;
+           /*---- FIRST ENTRY IN LIST ----*/
+           ADDITEM_TOP = A;
+           ADDITEM_END = A;
+           A -&gt ADDITEM_NODE.NEXT_PTR = NULL;
+           GOTO NEXT_ADDITEM;
+         END;
+     
+      /*---- FIND POSITION TO INSERT NODE IN LIST ----*/
+      PREV_PTR = ADDITEM_TOP;
+      LOC_PTR  = ADDITEM_TOP;
+      NEXT_PTR = LOC_PTR-&gtADDITEM_NODE.NEXT_PTR;  /*ADDED PCGW*/
+      A-&gtADDITEM_NODE.KEY = A-&gtADDITEM_NODE.PCN ||
+                            A-&gtADDITEM_NODE.CN ||
+                            A-&gtADDITEM_NODE.ACTION ||
+                            A-&gtADDITEM_NODE.IELINENO;
+      LOC_PTR-&gtADDITEM_NODE.KEY = LOC_PTR-&gtADDITEM_NODE.PCN ||
+                                  LOC_PTR-&gtADDITEM_NODE.CN ||
+                                  LOC_PTR-&gtADDITEM_NODE.ACTION ||
+                                  LOC_PTR-&gtADDITEM_NODE.IELINENO;
+       DO WHILE ( A -&gt ADDITEM_NODE.KEY &gt
+                 LOC_PTR -&gt ADDITEM_NODE.KEY &amp
+                 LOC_PTR -&gt ADDITEM_NODE.NEXT_PTR ^= NULL);
+         PREV_PTR = LOC_PTR;
+         LOC_PTR = LOC_PTR -&gt ADDITEM_NODE.NEXT_PTR;
+         NEXT_PTR = LOC_PTR-&gtADDITEM_NODE.NEXT_PTR;  /*ADDED PCGW*/
+         LOC_PTR-&gtADDITEM_NODE.KEY = LOC_PTR-&gtADDITEM_NODE.PCN ||
+                                     LOC_PTR-&gtADDITEM_NODE.CN ||
+                                     LOC_PTR-&gtADDITEM_NODE.ACTION ||
+                                     LOC_PTR-&gtADDITEM_NODE.IELINENO;
+      END;
+     
+      /*---- INSERT THE NODE INTO THE LIST ---*/
+      SELECT;
+     
+        /*--- ADD NODE TO BEGINNING OF LIST ---*/
+        WHEN (LOC_PTR = ADDITEM_TOP &amp A -&gt ADDITEM_NODE.KEY &lt
+                                      LOC_PTR -&gt ADDITEM_NODE.KEY)
+          DO;
+            A -&gt ADDITEM_NODE.NEXT_PTR = ADDITEM_TOP;
+            ADDITEM_TOP = A;
+          END;
+     
+        /*--- ADD NODE TO END OF LIST ---*/
+        WHEN (LOC_PTR = ADDITEM_END &amp  A -&gt ADDITEM_NODE.KEY &gt
+                                       LOC_PTR -&gt ADDITEM_NODE.KEY)
+          DO;
+            LOC_PTR -&gt ADDITEM_NODE.NEXT_PTR = A;
+            ADDITEM_END = A;
+          END;
+     
+        /*--- INSERT NODE INTO MIDDLE OF LIST ---*/
+        OTHERWISE
+          DO;
+            /* ADDED PCGW 2/6/92.  INSERT IN ORDER IF THE NODES
+               HAVE THE SAME KEY. FOR EXAMPLE, TWO CHANGE ADDITEMS
+               FOR SAME IPLINENO.  (920131-3301) OH PROBLEM.      */
+            LOC_PTR-&gtADDITEM_NODE.NEXT_PTR = A;
+            A-&gtADDITEM_NODE.NEXT_PTR = NEXT_PTR;
+         /* 
+            PREV_PTR -&gt ADDITEM_NODE.NEXT_PTR = A;
+            A -&gt ADDITEM_NODE.NEXT_PTR = LOC_PTR;    */
+          END;
+      END;
+
+      END;   /* ELSE DO FOR ADDITEM.ACTION = C */
+     
+      NEXT_ADDITEM:
+     
+       ITRC =  ITREAD ('ADDITEM ','','',SQLOC);
+     
+       IF ITRC = 8
+          THEN ADDITEM_FOUND = '0'B;
+     
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END BUILD_ADDITEM_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                      PROCESS ADDENDUM ITEMS                       */
+ /*-------------------------------------------------------------------*/
+ PROCESS_ADDENDUM_ITEMS:  PROC;
+     
+   DCL SAVE_SEGMENT         CHAR (31),
+       PROJECT_SPECYEAR     CHAR (2),
+       CNALT                CHAR (3),
+       CSECNUM              CHAR (4),
+       P                    POINTER,
+       FOUND                BIT (1),
+       ACTION               CHAR (1),
+       (NEXT_NODE_PTR,
+        PREV_NODE_PTR)      POINTER,
+        ERROR               BIT  (1);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'PROCESS_ADDENDUM_ITEMS';
+     
+   A = ADDITEM_TOP;
+   DO WHILE (A ^= NULL);
+     
+      /*--- IF ADDENDUM ITEM IS STATE SUPPLIED THEN SKIP THIS ITEM ---*/
+      IF A -&gt ADDITEM_NODE.ISTATE = 'Y'
+         THEN GOTO NEXT_ADDITEM;
+     
+      ERROR = '0'B;
+ 
+      /*--- RTD 03/19/96 - CHECK THE ESTITEM LIST FOR THE PCN ---*/
+      /*--- AND CN FIRST BEFORE GOING TO ESTCATG              ---*/
+      P = ESTITEM_TOP;
+      FOUND = '0'B;
+      DO WHILE (P ^= NULL &amp ^FOUND);
+         IF P-&gtESTITEM_NODE.PCN = A-&gtADDITEM_NODE.PCN &amp
+            P-&gtESTITEM_NODE.CN  = A-&gtADDITEM_NODE.CN
+            THEN FOUND = '1'B;
+            ELSE P = P-&gtESTITEM_NODE.NEXT_PTR;
+      END;
+
+      IF ^FOUND
+         THEN DO;
+           /*--- CHECK VALIDITY OF PCN AND CN AGAINST ESTCATG ---*/
+           ESTCATG_FOUND = '1'B;
+     
+           ITRC = ITREAD ('ESTCATG ',A-&gtADDITEM_NODE.PCN ||
+                          A-&gtADDITEM_NODE.CN,'0','');
+           IF ITRC = 8
+              THEN ESTCATG_FOUND = '0'B;
+     
+           IF ^ESTCATG_FOUND
+              THEN CALL FATAL_ERROR ('PROGRAM',
+                        'NO ESTCATG RECORD FOUND FOR PCN = ' ||
+                        A-&gtADDITEM_NODE.PCN ||
+                        ' CN = ' || A-&gtADDITEM_NODE.CN);
+         END;     
+
+      /*--- CHECK FOR MULTIPLE ITEM NUMBERS FOR THE SAME PROPOSAL ---*/
+      /*--- LINE NUMBER - IF MULTIPLE ITEM NUMBERS THEN KEEP      ---*/
+      /*--- ORIGINAL ITEM NUMBER AND IGNORE THE ITEM NUMBER IN    ---*/
+      /*--- ADDITEM                                               ---*/
+     
+      FOUND = '0'B;
+      EI = ESTITEM_TOP;
+      DO WHILE (EI ^= NULL &amp ^FOUND);
+     
+         IF EI -&gt ESTITEM_NODE.PCN  = A-&gtADDITEM_NODE.PCN &amp
+            EI -&gt ESTITEM_NODE.CN   = A-&gtADDITEM_NODE.CN  &amp
+            EI -&gt ESTITEM_NODE.LINE = A-&gtADDITEM_NODE.IPLINENO
+            THEN IF EI -&gt ESTITEM_NODE.ITEM ^= A-&gtADDITEM_NODE.ITEM
+                 THEN DO;
+                   ERROR = '1'B;
+                   FOUND = '1'B;
+                 END;
+     
+          EI = EI -&gt ESTITEM_NODE.NEXT_PTR;
+     
+       END;
+
+       /*--- CONTINUE CHECKS BASED ON VALUE OF ACTION CODE ---*/
+       ACTION = A-&gtADDITEM_NODE.ACTION;
+     
+       SELECT;
+     
+         WHEN (ACTION = 'A')
+           DO;
+            /*---- VERIFY NON-EXISTENCE OF RECORDS TO BE ADDED -----*/
+            /*---- CHECK AGAINST ITEMS ON ITEM LIST            -----*/
+            EI = ESTITEM_TOP;
+            FOUND = '0'B;
+            DO WHILE (EI ^= NULL &amp ^FOUND);
+     
+               IF EI-&gtESTITEM_NODE.PCN      = A-&gtADDITEM_NODE.PCN &amp
+                  EI-&gtESTITEM_NODE.CN       = A-&gtADDITEM_NODE.CN  &amp
+                  EI-&gtESTITEM_NODE.IELINENO = A-&gtADDITEM_NODE.IELINENO
+                  THEN FOUND = '1'B;
+                  ELSE EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+            END;
+     
+            IF FOUND
+               THEN CALL FATAL_ERROR ('PROGRAM',
+                                      'DUPLICATE ESTITEM RECORD ' ||
+                                      'FOR PCN= ' ||
+                                      A-&gtADDITEM_NODE.PCN ||
+                                      ' CN= ' ||
+                                      A-&gtADDITEM_NODE.CN ||
+                                      ' LINE= ' ||
+                                      A-&gtADDITEM_NODE.IELINENO);
+     
+            /*--- VERIFY THE PROPOSAL LINE NUMBER IS NOT BLANK --*/
+            IF A-&gtADDITEM_NODE.IPLINENO = ' '
+               THEN CALL FATAL_ERROR ('PROGRAM',
+                                      'NO PROPOSAL LINE NUMBER FOR ' ||
+                                      'PCN = ' || A-&gtADDITEM_NODE.PCN);
+     
+            /*--- IF NO EXCEPTIONS ADD THE ADDITEM TO THE ESTIMATE --*/
+            /*--  ITEM LIST                                        --*/
+            IF ^ERROR
+               THEN DO;
+
+                 /*--- NEED SECTION NUMBER AND CATEGORY ALT CODE   ---*/
+                 /*--- FOR CATEGORY. TRY ESTITEM LIST FIRST BEFORE ---*/ 
+                 /*--- ESTCATG ITREAD.                             ---*/
+                 P = ESTITEM_TOP;
+                 FOUND = '0'B;
+                 DO WHILE (P ^= NULL &amp ^FOUND);
+                    IF P-&gtESTITEM_NODE.PCN = A-&gtADDITEM_NODE.PCN &amp
+                       P-&gtESTITEM_NODE.CN  = A-&gtADDITEM_NODE.CN
+                       THEN FOUND = '1'B;
+                       ELSE P = P-&gtESTITEM_NODE.NEXT_PTR;
+                 END;
+
+                 IF FOUND
+                    THEN DO;
+                      CSECNUM = P-&gtESTITEM_NODE.SECTION;
+                      CNALT   = P-&gtESTITEM_NODE.CNALT;
+                    END;
+                    ELSE DO;
+                      ITRC = ITREAD ('ESTCATG ',A-&gtADDITEM_NODE.PCN ||
+                                     A-&gtADDITEM_NODE.CN,'0','');
+                      CSECNUM = ESTCATG_RECORD.CSECNUM;
+                      CNALT   = ESTCATG_RECORD.CNALT;
+                    END;
+
+                 /*--- GET UNITS AND LUMP SUM UNITS FOR ITEMS ---*/
+                 RECORD_LOCKED = '0'B;
+                 ITRC = ITREAD ('PROJECT ',A-&gtADDITEM_NODE.PCN,'0','');
+                 IF ITRC = 8
+                    THEN CALL FATAL_ERROR ('PROGRAM',
+                             'PROJECT NOT FOUND PCN = ' ||
+                             A-&gtADDITEM_NODE.PCN || 'FROM PROPPROJ');
+
+                 PROJECT_SPECYEAR = PROJECT_RECORD.PSPECYR;
+     
+                 RECORD_LOCKED = '0'B;
+                 ITRC = ITREAD ('ITEMLIST',A-&gtADDITEM_NODE.ITEM ||
+                                PROJECT_SPECYEAR,'0','');
+     
+                 ALLOCATE ESTITEM_NODE SET(EI);
+     
+                 EI -&gt ESTITEM_NODE.PCN      = A-&gtADDITEM_NODE.PCN;
+                 EI -&gt ESTITEM_NODE.CN       = A-&gtADDITEM_NODE.CN;
+                 EI -&gt ESTITEM_NODE.IELINENO = A-&gtADDITEM_NODE.IELINENO;
+                 EI -&gt ESTITEM_NODE.SECTION  = CSECNUM;
+                 EI -&gt ESTITEM_NODE.LINE     = A-&gtADDITEM_NODE.IPLINENO;
+                 EI -&gt ESTITEM_NODE.QTY      = A-&gtADDITEM_NODE.IQTY;
+                 EI -&gt ESTITEM_NODE.PRICE    = A-&gtADDITEM_NODE.IPRICE;
+                 EI -&gt ESTITEM_NODE.INONPAR  = A-&gtADDITEM_NODE.INONPAR;
+                 EI -&gt ESTITEM_NODE.ITEM     = A-&gtADDITEM_NODE.ITEM;
+                 EI -&gt ESTITEM_NODE.UNIT     = ITEMLIST_RECORD.IUNITS;
+                 EI -&gt ESTITEM_NODE.UNITLS   = ITEMLIST_RECORD.IUNITSLS;
+                 EI -&gt ESTITEM_NODE.IALT     = A-&gtADDITEM_NODE.IALT;
+                 EI -&gt ESTITEM_NODE.CNALT    = CNALT;
+                 EI -&gt ESTITEM_NODE.SUPDES   = A-&gtADDITEM_NODE.ISUPDES;
+                 EI -&gt ESTITEM_NODE.FIXED_FLG= A-&gtADDITEM_NODE.IFIXED;
+                 EI -&gt ESTITEM_NODE.PRICER   = A-&gtADDITEM_NODE.IPRICER;
+                 EI -&gt ESTITEM_NODE.IPRPDES  = ' ';
+                 EI -&gt ESTITEM_NODE.SUPDES2  = A-&gtADDITEM_NODE.ISUPDES2;
+     
+                 EI -&gt ESTITEM_NODE.NEXT_PTR = NULL;
+     
+                 IF EI -&gt ESTITEM_NODE.UNIT = 'LS  ' &amp
+                    EI -&gt ESTITEM_NODE.UNITLS = '    '
+                      THEN EI -&gt ESTITEM_NODE.LUMPSUM = '1'B;
+                      ELSE EI -&gt ESTITEM_NODE.LUMPSUM = '0'B;
+     
+                 IF EI -&gt ESTITEM_NODE.UNIT = 'LS  ' &amp
+                    EI -&gt ESTITEM_NODE.UNITLS ^= '    '
+                      THEN EI -&gt ESTITEM_NODE.HYB_LUMPSUM = '1'B;
+                      ELSE EI -&gt ESTITEM_NODE.HYB_LUMPSUM = '0'B;
+     
+                 IF ESTITEM_TOP = NULL
+                    THEN ESTITEM_TOP = EI;
+                    ELSE ESTITEM_END -&gt ESTITEM_NODE.NEXT_PTR = EI;
+                 ESTITEM_END = EI;
+     
+               END;
+     
+           END;  /* A */
+     
+     
+         WHEN (ACTION = 'C')
+           DO;
+     
+            /*--- VERIFY EXISTENCE OF RECORDS TO BE CHANGED ---*/
+            EI = ESTITEM_TOP;
+            FOUND = '0'B;
+            DO WHILE (EI ^= NULL &amp ^FOUND);
+     
+               IF EI-&gtESTITEM_NODE.PCN      = A-&gtADDITEM_NODE.PCN &amp
+                  EI-&gtESTITEM_NODE.CN       = A-&gtADDITEM_NODE.CN  &amp
+                  EI-&gtESTITEM_NODE.IELINENO = A-&gtADDITEM_NODE.IELINENO
+                  THEN FOUND = '1'B;
+                  ELSE EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+            END;
+     
+            IF ^FOUND
+                THEN CALL FATAL_ERROR ('PROGRAM',
+                                  'NO ESTITEM RECORD EXISTS FOR' ||
+                                  ' PCN = ' || A-&gtADDITEM_NODE.PCN ||
+                                  ' CN = ' ||
+                                  A-&gtADDITEM_NODE.CN ||
+                                  ' IELINENO = ' ||
+<A NAME="BUILD_PROPOSAL_ITEM_LIST"></A>                                  A-&gtADDITEM_NODE.IELINENO);
+     
+            /*--- VERIFY THE PROPOSAL LINE NUMBER IS NOT BLANK --*/
+            IF A-&gtADDITEM_NODE.IPLINENO = ' '
+               THEN CALL FATAL_ERROR ('PROGRAM',
+                                      'NO PROPOSAL LINE NUMBER FOR ' ||
+                                      'PCN = ' || A-&gtADDITEM_NODE.PCN);
+     
+            /*--- CHANGE ESTITEM LIST WITH ADDITEM ENTRIES ---*/
+            EI -&gt ESTITEM_NODE.LINE      = A-&gtADDITEM_NODE.IPLINENO;
+            EI -&gt ESTITEM_NODE.ITEM      = A-&gtADDITEM_NODE.ITEM;
+            EI -&gt ESTITEM_NODE.IALT      = A-&gtADDITEM_NODE.IALT;
+            EI -&gt ESTITEM_NODE.PRICE     = A-&gtADDITEM_NODE.IPRICE;
+            EI -&gt ESTITEM_NODE.QTY       = A-&gtADDITEM_NODE.IQTY;
+            EI -&gt ESTITEM_NODE.FIXED_FLG = A-&gtADDITEM_NODE.IFIXED;
+            EI -&gt ESTITEM_NODE.SUPDES    = A-&gtADDITEM_NODE.ISUPDES;
+            EI -&gt ESTITEM_NODE.PRICER    = A-&gtADDITEM_NODE.IPRICER;
+            EI -&gt ESTITEM_NODE.INONPAR   = A-&gtADDITEM_NODE.INONPAR;
+            EI -&gt ESTITEM_NODE.SUPDES2   = A-&gtADDITEM_NODE.ISUPDES2;
+           END;  /* C */
+     
+     
+         WHEN (ACTION = 'D')
+           DO;
+             /*- VERIFY EXISTENCE OF ESTITEM RECORDS TO BE DELETED -*/
+             EI = ESTITEM_TOP;
+             FOUND = '0'B;
+             PREV_NODE_PTR = NULL;
+
+             DO WHILE (EI ^= NULL &amp ^FOUND);
+     
+                IF (EI-&gtESTITEM_NODE.PCN      = A-&gtADDITEM_NODE.PCN &amp
+                    EI-&gtESTITEM_NODE.CN       = A-&gtADDITEM_NODE.CN  &amp
+                    EI-&gtESTITEM_NODE.IELINENO = 
+                           A-&gtADDITEM_NODE.IELINENO)
+
+                   THEN
+                     FOUND = '1'B;
+                     
+                   ELSE DO;
+                     PREV_NODE_PTR = EI;
+                     EI = EI -&gt ESTITEM_NODE.NEXT_PTR;
+                   END;
+             END;
+     
+             IF ^FOUND THEN
+                CALL FATAL_ERROR ('PROGRAM',
+                                  'NO ESTITEM RECORD TO ' ||
+                                  'DELETE WITH PCN = ' ||
+                                  A-&gtADDITEM_NODE.PCN ||
+                                  ' CN = ' || A-&gtADDITEM_NODE.CN ||
+                                  ' IELINENO = ' ||
+                                  A-&gtADDITEM_NODE.IELINENO);
+     
+             /*--- FREE DELETED NODE FROM ESTITEM LIST ---*/
+
+      /*--ADDED THE FOLLOWING LOGIC, IN ORDER TO TAKE 
+          CARE OF THE SITUATION WHEN THE FIRST ITEM 
+          IN THE LIST IS THE ITEM WITH THE DELETE OPTION
+                    93/09/21 ----&gt   SHUBHA             */
+
+             IF (PREV_NODE_PTR = NULL) THEN
+                ESTITEM_TOP = EI-&gtESTITEM_NODE.NEXT_PTR;
+             ELSE DO;
+                NEXT_NODE_PTR = EI -&gt ESTITEM_NODE.NEXT_PTR;
+                PREV_NODE_PTR -&gt ESTITEM_NODE.NEXT_PTR = NEXT_NODE_PTR;
+             END;
+             
+             FREE EI -&gt ESTITEM_NODE;
+                
+           END;  /* D */
+     
+         OTHERWISE;
+     
+       END;  /* SELECT */
+     
+       NEXT_ADDITEM:
+     
+       A = A-&gtADDITEM_NODE.NEXT_PTR;
+     
+   END;  /* ADDITEM LEVEL */
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END PROCESS_ADDENDUM_ITEMS;
+     
+ /*-----------------------------------------------------------------*/
+ /*                     BUILD PROPOSAL ITEM LIST                    */
+ /*-----------------------------------------------------------------*/
+ BUILD_PROPOSAL_ITEM_LIST: PROC;
+     
+   DCL SAVE_SEGMENT        CHAR (31),
+       PREV_PRICE          FIXED DEC (13,5),
+       FOUND               BIT (1);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_PROPOSAL_ITEM_LISTS';
+     
+     
+   /*--- BUILD PROPOSAL ITEM LIST ---*/
+   EI = ESTITEM_TOP;
+   PROPITEM_TOP = NULL;
+   PROPITEM_END = NULL;
+     
+   /*--- CREATES ONE PROPOSAL NODE FOR ALL ESTIMATE ----*/
+   /*--- ITEMS WITH SAME PROPOSAL LINE NUMBER       ----*/
+   DO WHILE (EI ^= NULL);
+     
+      PI = PROPITEM_TOP;
+      FOUND = '0'B;
+      DO WHILE ( PI ^= NULL &amp ^FOUND );
+         IF (PI -&gt PROPITEM_NODE.LINE = EI -&gt ESTITEM_NODE.LINE)
+             THEN FOUND = '1'B;
+             ELSE PI = PI -&gt PROPITEM_NODE.NEXT_PTR;
+      END;
+
+     /* ADDED BY PCGW FOR BSR 940060 */
+     IF FOUND THEN
+        PREV_PRICE = PI-&gtPROPITEM_NODE.NPRICE;
+     
+     IF EI -&gt ESTITEM_NODE.PRICER ^= ' '
+         THEN TEMP_PRICE = C$D13V5(EI -&gt ESTITEM_NODE.PRICER);
+         ELSE TEMP_PRICE = C$D13V5(EI -&gt ESTITEM_NODE.PRICE);
+     
+      QUANTITY = C$D12V3(EI -&gt ESTITEM_NODE.QTY);
+     
+     
+      ON FIXEDOVERFLOW OVERFLOW = '1'B;
+      OVERFLOW = '0'B;
+      EXTENDED_PRICE = MULTIPLY(TEMP_PRICE, QUANTITY, 13, 5); /* IBM */
+      IF OVERFLOW
+         THEN CALL FATAL_ERROR ('PROGRAM',
+                                'EXTENDED PRICE TOO LARGE ' ||
+                                'ON PROPOSAL ITEM ' ||
+                                PI -&gt PROPITEM_NODE.LINE);
+     
+      IF ^FOUND
+         THEN DO;
+     
+           ALLOCATE PROPITEM_NODE SET (PI);
+     
+           PI -&gt PROPITEM_NODE.PCN        = EI -&gt ESTITEM_NODE.PCN;
+           PI -&gt PROPITEM_NODE.CN         = EI -&gt ESTITEM_NODE.CN;
+           PI -&gt PROPITEM_NODE.SECTION    = EI -&gt ESTITEM_NODE.SECTION;
+           PI -&gt PROPITEM_NODE.CNALT      = EI -&gt ESTITEM_NODE.CNALT;
+           PI -&gt PROPITEM_NODE.LINE       = EI -&gt ESTITEM_NODE.LINE;
+           PI -&gt PROPITEM_NODE.ITEM       = EI -&gt ESTITEM_NODE.ITEM;
+           PI -&gt PROPITEM_NODE.IALT       = EI -&gt ESTITEM_NODE.IALT;
+           PI -&gt PROPITEM_NODE.UNIT       = EI -&gt ESTITEM_NODE.UNIT;
+           PI -&gt PROPITEM_NODE.UNITLS     = EI -&gt ESTITEM_NODE.UNITLS;
+           PI -&gt PROPITEM_NODE.LOWCOST    = '0'B;
+           PI -&gt PROPITEM_NODE.NQTY       = QUANTITY;
+           PI -&gt PROPITEM_NODE.NPRICE     = TEMP_PRICE;
+           PI -&gt PROPITEM_NODE.QTY        = ' ';
+           PI -&gt PROPITEM_NODE.PRICE      = ' ';
+           PI -&gt PROPITEM_NODE.EXTAMT     = ' ';
+           PI -&gt PROPITEM_NODE.NEXTAMT    = ROUND(EXTENDED_PRICE,2);
+           PI -&gt PROPITEM_NODE.LUMPSUM    = EI -&gt ESTITEM_NODE.LUMPSUM;
+           PI -&gt PROPITEM_NODE.HYB_LUMPSUM =
+                                EI -&gt ESTITEM_NODE.HYB_LUMPSUM;
+           PI -&gt PROPITEM_NODE.SUPDES     = EI -&gt ESTITEM_NODE.SUPDES;
+           PI -&gt PROPITEM_NODE.SUPDES2    = EI -&gt ESTITEM_NODE.SUPDES2;
+           PI -&gt PROPITEM_NODE.FIXED_FLG  =
+                                EI -&gt ESTITEM_NODE.FIXED_FLG;
+           PI -&gt PROPITEM_NODE.DIVIDEP    = '0'B;  /* ADDED PCGW */
+           PI -&gt PROPITEM_NODE.PIPRPDES   = EI -&gt ESTITEM_NODE.IPRPDES;
+           PI -&gt PROPITEM_NODE.NEXT_PTR   = NULL;
+
+           /* MOVED HERE BY PCGW (940060) FROM OUTSIDE IF STATEMENT */
+           PREV_PRICE = TEMP_PRICE;
+     
+           IF PROPITEM_TOP = NULL
+              THEN PROPITEM_TOP = PI;
+              ELSE PROPITEM_END -&gt PROPITEM_NODE.NEXT_PTR = PI;
+              PROPITEM_END = PI;
+         END;
+<A NAME="BUILD_ALTERNATE_LISTS"></A>       /* ACCUMULATE TOTAL QUANTITY &amp TOTAL EXTENDED PRICE */
+         ELSE DO;
+           PI -&gt PROPITEM_NODE.NQTY   = PI -&gt PROPITEM_NODE.NQTY +
+                                        QUANTITY;
+     
+           IF OVERFLOW
+              THEN CALL FATAL_ERROR ('PROGRAM',
+                                     'QUANTITY TOO LARGE ON ' ||
+                                     'PROPOSAL ITEM ' ||
+                                     PI -&gt PROPITEM_NODE.LINE);
+     
+           PI -&gt PROPITEM_NODE.NEXTAMT = PI -&gt PROPITEM_NODE.NEXTAMT +
+                                         ROUND(EXTENDED_PRICE,2);
+     
+           IF OVERFLOW
+              THEN CALL FATAL_ERROR ('PROGRAM',
+                                     'TOTAL EXTENDED PRICE TOO '||
+                                     'LARGE ON PROPOSAL ITEM ' ||
+                                     PI -&gt PROPITEM_NODE.LINE);
+           /* ADDED PCGW 02/11/92 */
+           IF (TEMP_PRICE ^= PREV_PRICE) THEN
+              PI-&gtPROPITEM_NODE.DIVIDEP = '1'B;     
+         END;
+     
+      EI = EI -&gt ESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   REVERT FIXEDOVERFLOW;
+     
+   /*--- COMPUTE WEIGHTED PRICES FOR PROPOSAL ITEMS ---*/
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+     
+      PI-&gtPROPITEM_NODE.EXTAMT
+             = D11V2$C(PI -&gt PROPITEM_NODE.NEXTAMT);
+     
+      /*--- SET QTY TO 1 IF LUMPSUM ---*/
+      IF PI -&gt PROPITEM_NODE.LUMPSUM
+         THEN PI -&gt PROPITEM_NODE.NQTY = 1;
+     
+      PI -&gt PROPITEM_NODE.QTY
+              = D12V3$C(ROUND(PI-&gtPROPITEM_NODE.NQTY,3));
+     
+     
+      /*--- CALCULATE PRICE BASED ON LUMP SUM FLAG ---*/
+      IF PI -&gt PROPITEM_NODE.LUMPSUM | PI -&gt PROPITEM_NODE.HYB_LUMPSUM
+         THEN PI -&gt PROPITEM_NODE.NPRICE =
+                    PI-&gtPROPITEM_NODE.NEXTAMT;
+         ELSE DO;
+           IF PI -&gt PROPITEM_NODE.NQTY = 0 THEN
+              PI -&gt PROPITEM_NODE.NPRICE = 0;
+           ELSE 
+              IF PI-&gtPROPITEM_NODE.DIVIDEP = '1'B THEN
+                 PI-&gtPROPITEM_NODE.NPRICE =
+                     DIVIDE (PI-&gtPROPITEM_NODE.NEXTAMT,
+                             PI-&gtPROPITEM_NODE.NQTY,13,5);
+         END;   /* END ELSE DO */
+     
+      /*--- FORMAT PRICE ---*/
+     
+      PI -&gt PROPITEM_NODE.PRICE
+               = D13V5$C(ROUND (PI-&gtPROPITEM_NODE.NPRICE,5));
+     
+      PI = PI -&gt PROPITEM_NODE.NEXT_PTR;
+     
+   END;
+     
+     
+     
+     
+   CALL BUILD_ALTERNATE_LISTS;
+     
+   CALL EVALUATE_ITEM_ALTERNATES;
+     
+   CALL BUILD_SECTION_LIST;
+     
+   CALL EVALUATE_CATEGORY_ALTERNATES;
+     
+   CALL CREATE_PROPITEM_RECORDS;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END BUILD_PROPOSAL_ITEM_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                           BUILD_ALTERNATE_LISTS                   */
+ /*                                                                   */
+ /*     BUILD A CATEGORY AND ITEM ALTERNATE LISTS FROM PROPOSAL       */
+ /*     ITEM LIST                                                     */
+ /*-------------------------------------------------------------------*/
+     
+ BUILD_ALTERNATE_LISTS: PROC;
+     
+   DCL SAVE_SEGMENT         CHAR (31),
+       FOUND_NODE           BIT  (1),
+       (PREV_PTR, LOC_PTR)  POINTER;
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_ALTERNATE_LISTS';
+     
+   CNALT_TOP    = NULL;
+   CNALT_END    = NULL;
+   IALT_TOP     = NULL;
+   IALT_END     = NULL;
+     
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+     
+      T = IALT_TOP;
+      FOUND_NODE = '0'B;
+      DO WHILE (T ^= NULL &amp ^FOUND_NODE);
+         IF T-&gtIALT_NODE.IALT = PI-&gtPROPITEM_NODE.IALT
+            THEN FOUND_NODE = '1'B;
+            ELSE T = T-&gtIALT_NODE.NEXT_PTR;
+      END;
+     
+      IF FOUND_NODE
+         THEN DO;
+           T-&gtIALT_NODE.COST = T-&gtIALT_NODE.COST +
+                               PI-&gtPROPITEM_NODE.NEXTAMT;
+           GOTO CATEGORY_ALTERNATE_STUFF;
+         END;
+     
+      ALLOCATE IALT_NODE SET (T);
+      T-&gtIALT_NODE.IALT           = PI-&gtPROPITEM_NODE.IALT;
+      T-&gtIALT_NODE.COST           = PI-&gtPROPITEM_NODE.NEXTAMT;
+      T-&gtIALT_NODE.LOWCOST        = '0'B;
+      T-&gtIALT_NODE.NEXT_PTR = NULL;
+     
+      IF IALT_TOP = NULL
+         THEN DO;
+           /*---- FIRST ENTRY IN LIST ----*/
+           IALT_TOP = T;
+           IALT_END = T;
+           T-&gtIALT_NODE.NEXT_PTR = NULL;
+           GOTO CATEGORY_ALTERNATE_STUFF;
+         END;
+     
+      /*---- FIND POSITION TO INSERT NODE IN LIST ----*/
+      PREV_PTR = IALT_TOP;
+      LOC_PTR  = IALT_TOP;
+      DO WHILE (T-&gtIALT_NODE.IALT &gt LOC_PTR-&gtIALT_NODE.IALT &amp
+                LOC_PTR-&gtIALT_NODE.NEXT_PTR ^= NULL);
+         PREV_PTR = LOC_PTR;
+         LOC_PTR = LOC_PTR -&gt IALT_NODE.NEXT_PTR;
+      END;
+     
+      /*---- INSERT THE NODE INTO THE LIST ---*/
+      SELECT;
+     
+        /*--- ADD NODE TO BEGINNING OF LIST ---*/
+        WHEN (LOC_PTR = IALT_TOP &amp
+              T-&gtIALT_NODE.IALT &lt LOC_PTR-&gtIALT_NODE.IALT)
+          DO;
+            T-&gtIALT_NODE.NEXT_PTR = IALT_TOP;
+            IALT_TOP = T;
+          END;
+     
+        /*--- ADD NODE TO END OF LIST ---*/
+        WHEN (LOC_PTR = IALT_END &amp
+              T-&gtIALT_NODE.IALT &gt LOC_PTR-&gtIALT_NODE.IALT)
+          DO;
+            LOC_PTR-&gtIALT_NODE.NEXT_PTR = T;
+            IALT_END = T;
+          END;
+     
+        /*--- INSERT NODE INTO MIDDLE OF LIST ---*/
+        OTHERWISE
+          DO;
+            PREV_PTR-&gtIALT_NODE.NEXT_PTR = T;
+            T-&gtIALT_NODE.NEXT_PTR = LOC_PTR;
+<A NAME="EVALUATE_ITEM_ALTERNATES"></A>          END;
+      END;
+     
+      CATEGORY_ALTERNATE_STUFF:
+     
+      T = CNALT_TOP;
+      FOUND_NODE = '0'B;
+      DO WHILE (T ^= NULL &amp ^FOUND_NODE);
+         IF T-&gtCNALT_NODE.CNALT = PI-&gtPROPITEM_NODE.CNALT
+            THEN FOUND_NODE = '1'B;
+            ELSE T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+      IF FOUND_NODE
+         THEN DO;
+           T-&gtCNALT_NODE.COST = T-&gtCNALT_NODE.COST +
+                                PI-&gtPROPITEM_NODE.NEXTAMT;
+           GOTO NEXT_ITEM;
+         END;
+     
+      ALLOCATE CNALT_NODE SET (T);
+      T-&gtCNALT_NODE.CNALT    = PI-&gtPROPITEM_NODE.CNALT;
+      T-&gtCNALT_NODE.COST     = PI-&gtPROPITEM_NODE.NEXTAMT;
+      T-&gtCNALT_NODE.LOWCOST  = '0'B;
+      T-&gtCNALT_NODE.NEXT_PTR = NULL;
+     
+      IF CNALT_TOP = NULL
+         THEN DO;
+           /*---- FIRST ENTRY IN LIST ----*/
+           CNALT_TOP = T;
+           CNALT_END = T;
+           T-&gtCNALT_NODE.NEXT_PTR = NULL;
+           GOTO NEXT_ITEM;
+         END;
+     
+      /*---- FIND POSITION TO INSERT NODE IN LIST ----*/
+      PREV_PTR = CNALT_TOP;
+      LOC_PTR  = CNALT_TOP;
+      DO WHILE (T-&gtCNALT_NODE.CNALT &gt LOC_PTR-&gtCNALT_NODE.CNALT &amp
+                LOC_PTR-&gtCNALT_NODE.NEXT_PTR ^= NULL);
+         PREV_PTR = LOC_PTR;
+         LOC_PTR = LOC_PTR -&gt CNALT_NODE.NEXT_PTR;
+      END;
+     
+      /*---- INSERT THE NODE INTO THE LIST ---*/
+      SELECT;
+     
+        /*--- ADD NODE TO BEGINNING OF LIST ---*/
+        WHEN (LOC_PTR = CNALT_TOP &amp T-&gtCNALT_NODE.CNALT &lt
+                                    LOC_PTR-&gtCNALT_NODE.CNALT)
+          DO;
+            T-&gtCNALT_NODE.NEXT_PTR = CNALT_TOP;
+            CNALT_TOP = T;
+          END;
+     
+        /*--- ADD NODE TO END OF LIST ---*/
+        WHEN (LOC_PTR = CNALT_END &amp T-&gtCNALT_NODE.CNALT &gt
+                                    LOC_PTR-&gtCNALT_NODE.CNALT)
+          DO;
+            LOC_PTR-&gtCNALT_NODE.NEXT_PTR = T;
+            CNALT_END = T;
+          END;
+     
+        /*--- INSERT NODE INTO MIDDLE OF LIST ---*/
+        OTHERWISE
+          DO;
+            PREV_PTR-&gtCNALT_NODE.NEXT_PTR = T;
+            T-&gtCNALT_NODE.NEXT_PTR = LOC_PTR;
+          END;
+      END;
+     
+      NEXT_ITEM:
+      PI = PI-&gtPROPITEM_NODE.NEXT_PTR;
+   END;
+     
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END BUILD_ALTERNATE_LISTS;
+     
+ /*-------------------------------------------------------------------*/
+ /*                         EVALUATE_ITEM_ALTERNATES                  */
+ /*                                                                   */
+ /*  EVALUATE THE ITEM ALTERNATES TO FIND THE LEAST COST ALTERNATE OF */
+ /*  EACH OF THE ITEM ALTERNATE SETS.  FLAG THE PROPOSAL ITEMS AS TO  */
+ /*  WHETHER THEY ARE MEMBERS OF LOW COST ALTERNATE SETS OR NOT.  THE */
+ /*  PROPOSAL ITEMS THAT HAVE BEEN FLAGGED AS LOWCOST WILL THEN BE    */
+ /*  USED IN CATEGORY ALTERNATE EVALUATION                            */
+ /*-------------------------------------------------------------------*/
+     
+ EVALUATE_ITEM_ALTERNATES: PROC;
+     
+   DCL SAVE_SEGMENT                    CHAR (31),
+       (LEAST_COST_PTR,T)              POINTER INIT(NULL),
+       LEAST_COST                      FIXED DEC (11,2),
+       CURRENT_ALT_SET                 CHAR (2) INIT (' ');
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'EVALUATE_ITEM_ALTERNATES';
+     
+     
+   /*---- FIND LEAST COST ALTERNATE FOR EACH ALTERNATE SET -----*/
+   T = IALT_TOP;
+     
+   LEAST_COST_PTR  = T;
+   LEAST_COST      = T-&gtIALT_NODE.COST;
+   IF T ^= NULL
+      THEN CURRENT_ALT_SET = SUBSTR (T-&gtIALT_NODE.IALT,1,2);
+     
+   DO WHILE (T ^= NULL);
+     
+      IF SUBSTR (T-&gtIALT_NODE.IALT,1,2) ^= CURRENT_ALT_SET
+         THEN DO;
+           LEAST_COST_PTR-&gtIALT_NODE.LOWCOST = '1'B;
+     
+     
+           CURRENT_ALT_SET = SUBSTR(T-&gtIALT_NODE.IALT,1,2);
+           LEAST_COST      = T-&gtIALT_NODE.COST;
+           LEAST_COST_PTR  = T;
+         END;
+     
+      IF T-&gtIALT_NODE.COST &lt LEAST_COST
+         THEN DO;
+           LEAST_COST_PTR = T;
+           LEAST_COST     = T-&gtIALT_NODE.COST;
+         END;
+     
+      T = T-&gtIALT_NODE.NEXT_PTR;
+   END;
+   LEAST_COST_PTR-&gtIALT_NODE.LOWCOST = '1'B;
+     
+   /*---- FLAG THE LOWCOST ITEMS USING THE ITEM ALTERNATE LIST -----*/
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+      T = IALT_TOP;
+      DO WHILE (T-&gtIALT_NODE.IALT ^= PI-&gtPROPITEM_NODE.IALT &amp
+                T-&gtIALT_NODE.NEXT_PTR ^= NULL);
+         T = T-&gtIALT_NODE.NEXT_PTR;
+      END;
+     
+      IF T-&gtIALT_NODE.IALT = PI-&gtPROPITEM_NODE.IALT
+         THEN DO;
+      PI-&gtPROPITEM_NODE.LOWCOST = T-&gtIALT_NODE.LOWCOST;
+      END;
+      PI = PI-&gtPROPITEM_NODE.NEXT_PTR;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END EVALUATE_ITEM_ALTERNATES;
+     
+ /*-------------------------------------------------------------------*/
+ /*                       EVALUATE_CATEGORY_ALTERNATES                */
+ /*                                                                   */
+ /*  EVALUATE THE CATEGORY ALTERNATES TO FIND THE LEAST COST ALTERNATE*/
+ /*  OF EACH  OF THE CATEGORY ALTERNATE SETS.  USE ONLY THE PROPOSAL  */
+ /*  ITEMS WHICH HAVE  BEEN FLAGGED AS LOWCOST BY                     */
+ /*  EVALUATE_ITEM_ALTERNATES.  FLAG THE PROPOSAL  ITEMS AS TO        */
+ /*  WHETHER THEY ARE MEMBERS OF LOW COST CATEGORY ALTERNATE SETS OR  */
+ /*  NOT.                                                             */
+ /*                                                                   */
+ /*-------------------------------------------------------------------*/
+     
+ EVALUATE_CATEGORY_ALTERNATES: PROC;
+     
+   DCL SAVE_SEGMENT                    CHAR (31),
+       (LEAST_COST_PTR,TEMP_CNALT_TOP,
+        TEMP_CNALT_END,N)               POINTER,
+       LEAST_COST                      FIXED DEC (11,2),
+       HAS_LOW_COST_ITEMS              BIT (1),
+       CURRENT_ALT_SET                 CHAR (2);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'EVALUATE_CATEGORY_ALTERNATES';
+     
+   /*-- BUILD TEMPORARY CATEGORY ALTERNATE LIST CONTAINING ONLY --*/
+   /*-- ALTERNATES FOR WHICH CONTAIN LOWCOST ITEMS.             --*/
+   TEMP_CNALT_TOP = NULL;
+   TEMP_CNALT_END = NULL;
+   T = CNALT_TOP;
+   DO WHILE (T ^= NULL);
+     
+      HAS_LOW_COST_ITEMS = '0'B;
+      PI = PROPITEM_TOP;
+      DO WHILE (PI ^= NULL &amp ^HAS_LOW_COST_ITEMS);
+         IF PI-&gtPROPITEM_NODE.CNALT = T-&gtCNALT_NODE.CNALT
+            THEN HAS_LOW_COST_ITEMS = PI-&gtPROPITEM_NODE.LOWCOST;
+         PI = PI-&gtPROPITEM_NODE.NEXT_PTR;
+      END;
+     
+     
+      IF HAS_LOW_COST_ITEMS
+         THEN DO;
+           ALLOCATE CNALT_NODE SET (N);
+           N-&gtCNALT_NODE.CNALT    = T-&gtCNALT_NODE.CNALT;
+           N-&gtCNALT_NODE.COST     = 0;
+           N-&gtCNALT_NODE.LOWCOST  = '0'B;
+           N-&gtCNALT_NODE.NEXT_PTR = NULL;
+           IF TEMP_CNALT_TOP = NULL
+              THEN TEMP_CNALT_TOP = N;
+              ELSE TEMP_CNALT_END-&gtCNALT_NODE.NEXT_PTR = N;
+           TEMP_CNALT_END = N;
+         END;
+      T = T-&gtCNALT_NODE.NEXT_PTR;
+   END;
+     
+     
+<A NAME="BUILD_SECTION_LIST"></A>   /*--- ACCUMULATE THE TOTAL COST FOR EACH CATEGORY ALTERNATE    ---*/
+   /*--- ON TEMPORARY CATEGORY ALTERNATE LIST                     ---*/
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+     
+      IF ^PI-&gtPROPITEM_NODE.LOWCOST
+         THEN GOTO NEXT_ITEM;
+     
+      T = TEMP_CNALT_TOP;
+      DO WHILE (T-&gtCNALT_NODE.CNALT ^= PI-&gtPROPITEM_NODE.CNALT &amp
+                T-&gtCNALT_NODE.NEXT_PTR ^= NULL);
+         T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+      OVERFLOW = '0'B;
+      T-&gtCNALT_NODE.COST = T-&gtCNALT_NODE.COST +
+                           PI-&gtPROPITEM_NODE.NEXTAMT;
+      IF OVERFLOW
+         THEN CALL FATAL_ERROR ('PROGRAM',
+                                'TOTAL COST OVERFLOW FOR ITEM ' ||
+                                'ALTERNATE SET=' ||
+                                PI-&gtPROPITEM_NODE.CNALT ||
+                                ' IN LETTING=' ||
+                                LETPROP_RECORD.LETTING ||
+                                ' CALL=' || LETPROP_RECORD.CALL);
+      NEXT_ITEM:
+      PI = PI-&gtPROPITEM_NODE.NEXT_PTR;
+   END;
+     
+     
+   /*--------- FIND LEAST COST ALTERNATE FOR EACH ALTERNATE SET ----- */
+   T = TEMP_CNALT_TOP;
+   LEAST_COST_PTR  = T;
+   LEAST_COST      = T-&gtCNALT_NODE.COST;
+   CURRENT_ALT_SET = SUBSTR (T-&gtCNALT_NODE.CNALT,1,2);
+     
+     
+   DO WHILE (T ^= NULL);
+     
+      IF SUBSTR (T-&gtCNALT_NODE.CNALT,1,2) ^= CURRENT_ALT_SET
+         THEN DO;
+           LEAST_COST_PTR-&gtCNALT_NODE.LOWCOST = '1'B;
+           CURRENT_ALT_SET = SUBSTR(T-&gtCNALT_NODE.CNALT,1,2);
+           LEAST_COST      = T-&gtCNALT_NODE.COST;
+           LEAST_COST_PTR  = T;
+         END;
+     
+      IF T-&gtCNALT_NODE.COST &lt LEAST_COST
+         THEN DO;
+           LEAST_COST_PTR = T;
+           LEAST_COST     = T-&gtCNALT_NODE.COST;
+         END;
+     
+      T = T-&gtCNALT_NODE.NEXT_PTR;
+   END;
+   IF LEAST_COST_PTR ^= NULL
+      THEN LEAST_COST_PTR-&gtCNALT_NODE.LOWCOST = '1'B;
+     
+     
+   /*-- FLAG THE LOWCOST ITEMS USING THE TEMPORARY CATEGORY     ---*/
+   /*-- ALTERNATE LIST                                          ---*/
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+     
+      IF ^PI-&gtPROPITEM_NODE.LOWCOST
+         THEN GOTO NEXT_PROPITEM;
+     
+      T = TEMP_CNALT_TOP;
+      DO WHILE (T-&gtCNALT_NODE.CNALT ^= PI-&gtPROPITEM_NODE.CNALT);
+         T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+      PI-&gtPROPITEM_NODE.LOWCOST = T-&gtCNALT_NODE.LOWCOST;
+     
+      NEXT_PROPITEM:
+      PI = PI-&gtPROPITEM_NODE.NEXT_PTR;
+   END;
+     
+     
+   /*---- FREE UP THE TEMPORARY CATEGORY ALTERNATE LIST ------*/
+   DO WHILE (TEMP_CNALT_TOP ^= NULL);
+      T = TEMP_CNALT_TOP-&gtCNALT_NODE.NEXT_PTR;
+      FREE TEMP_CNALT_TOP-&gtCNALT_NODE;
+      TEMP_CNALT_TOP = T;
+   END;
+     
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END EVALUATE_CATEGORY_ALTERNATES;
+     
+ /*-------------------------------------------------------------------*/
+ /*                     BUILD SECTION LIST                            */
+ /*-------------------------------------------------------------------*/
+ BUILD_SECTION_LIST:  PROC;
+     
+   DCL SAVE_SEGMENT          CHAR (31),
+       TOTAL_SECTION_AMOUNT  FIXED DEC (13,2),
+       EXTAMT                FIXED DEC (11,2),
+       FOUND                 BIT (1);
+<A NAME="CREATE_PROPITEM_RECORDS"></A>     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_SECTION_LIST';
+     
+   SECTION_TOP = NULL;
+   SECTION_END = NULL;
+     
+   PI = PROPITEM_TOP;
+     
+   /*--- CREATES ONE SECTION NODE FOR ALL PROPOSALS WITH ---*/
+   /*--- SAME SECTION #                                  ---*/
+   DO WHILE (PI ^= NULL);
+      FOUND = '0'B;
+      S = SECTION_TOP;
+      DO WHILE (S ^= NULL &amp ^FOUND);
+         IF S -&gt SECTION_NODE.SECTION =
+                PI -&gt PROPITEM_NODE.SECTION
+                THEN FOUND = '1'B;
+                ELSE S = S -&gt SECTION_NODE.NEXT_PTR;
+      END;
+     
+     
+      EXTAMT = C$D11V2(PI -&gt PROPITEM_NODE.EXTAMT);
+     
+      ON FIXEDOVERFLOW OVERFLOW = '1'B;
+      IF ^FOUND
+         THEN DO;
+     
+           ALLOCATE SECTION_NODE SET (S);
+           S -&gt SECTION_NODE.SECTION = PI -&gt PROPITEM_NODE.SECTION;
+           S -&gt SECTION_NODE.EXTAMT  = ' ';
+           S -&gt SECTION_NODE.CNALT   = PI -&gt PROPITEM_NODE.CNALT;
+           S -&gt SECTION_NODE.HAS_IALT     = '0'B;
+           S -&gt SECTION_NODE.HAS_NON_IALT = '0'B;    
+           IF PI-&gt PROPITEM_NODE.LOWCOST
+               THEN S -&gt SECTION_NODE.NEXTAMT     = EXTAMT;
+               ELSE S -&gt SECTION_NODE.NEXTAMT     = 0;
+           S -&gt SECTION_NODE.NEXT_PTR    = NULL;
+     
+           IF SECTION_TOP = NULL
+              THEN SECTION_TOP = S;
+              ELSE SECTION_END -&gt SECTION_NODE.NEXT_PTR = S;
+           SECTION_END = S;
+         END;
+         ELSE DO;
+     
+          OVERFLOW = '0'B;
+     
+          IF PI-&gt PROPITEM_NODE.LOWCOST
+             THEN S-&gtSECTION_NODE.NEXTAMT = S-&gtSECTION_NODE.NEXTAMT +
+                                      EXTAMT;
+          IF OVERFLOW
+            THEN CALL FATAL_ERROR ('PROGRAM',
+                                   'SECTION TOTAL TOO LARGE ' ||
+                                   'ON SECTION NUMBER ' ||
+                                   S -&gt SECTION_NODE.SECTION);
+         END;
+   
+      IF PI -&gt PROPITEM_NODE.IALT = ' '
+         THEN S-&gtSECTION_NODE.HAS_NON_IALT = '1'B;
+         ELSE S-&gtSECTION_NODE.HAS_IALT = '1'B;
+  
+      PI = PI -&gt PROPITEM_NODE.NEXT_PTR;
+     
+   END;
+   REVERT FIXEDOVERFLOW;
+     
+     
+   /*--- CALCULATE SECTION SUBTOTALS AND BID TOTAL ---*/
+   S = SECTION_TOP;
+   DO WHILE (S ^= NULL);
+     
+      SELECT;
+
+        WHEN (S-&gtSECTION_NODE.HAS_IALT &amp 
+              S-&gtSECTION_NODE.HAS_NON_IALT)
+          S-&gtSECTION_NODE.IALT = 'SOME';
+
+        WHEN (^S-&gtSECTION_NODE.HAS_IALT)
+          S-&gtSECTION_NODE.IALT = 'NONE';
+
+        OTHERWISE
+          S-&gtSECTION_NODE.IALT = 'ALL';
+      END;
+
+      /*--- FORMAT SECTION TOTAL AMOUNT ---*/
+      S -&gt SECTION_NODE.EXTAMT
+          = D11V2$C(S -&gt SECTION_NODE.NEXTAMT);
+     
+      S = S -&gt SECTION_NODE.NEXT_PTR;
+     
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END BUILD_SECTION_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                       PROPITEM SECTION                            */
+ /*-------------------------------------------------------------------*/
+     
+ CREATE_PROPITEM_RECORDS:  PROC;
+     
+   DCL SAVE_SEGMENT            CHAR (31),
+       SUM_EXTAMT              FIXED DEC (11,2),
+       P                       POINTER,
+       PROP_EXTAMT             CHAR (12);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'CREATE_PROPITEM_RECORDS';
+     
+   IF USE_TEMPORARY_PROPITEM
+      THEN GOTO SKIP_DELETE;
+     
+   /*--- FOR PERMANENT PROPITEM TABLE ONLY - DELETE ALL PROPITEM ---*/
+   /*--- RECORDS THAT ARE NOW OBSOLETE BECAUSE THE PROPOSAL LINE ---*/
+   /*--- OR THE SECTION NO LONGER EXISTS IN THE PROPOSAL.        ---*/
+
+   PROPITEM_FOUND = '1'B;
+
+   /*--- USE A FULL-KEY READ ON THE 'P' PROPITEM RECORD TO       ---*/
+   /*--- DETERMINE IF PROPITEMS EXIST.  THIS SAVES UNNECESSARY   ---*/
+   /*--- CPU USAGE IN BUILDING A CURSOR WHEN NO RECORDS EXIST    ---*/
+   /*--- TO SATISFY THE REQUEST.  IT CAN TAKE AS MUCH AS 10 CPU  ---*/
+   /*--- SECONDS TO DETERMINE THAT NO RECORDS EXIST.  960516-CMR ---*/
+   LINEFLAG = 'P';
+   IPLINENO = ' ';
+   PROPITEM_KEY = CONTID || LINEFLAG || IPLINENO;
+   ITRC = ITREAD('PROPITEM',PROPITEM_KEY,'0','');
+   IF ITRC=8
+     THEN PROPITEM_FOUND = '0'B;
+     ELSE DO;
+       PROPITEM_KEY = CONTID;
+       ITRC = ITREAD('PROPITEM',PROPITEM_KEY,'0','GE');
+       IF ITRC=8
+          THEN PROPITEM_FOUND = '0'B;
+       END;
+     
+   DO WHILE (PROPITEM_FOUND &amp PROPITEM_RECORD.CONTID = CONTID);
+
+      /*--- DOES THIS PROPITEM RECORD NEED TO BE DELETED ---*/
+      SELECT;
+        WHEN (PROPITEM_RECORD.LINEFLAG = 'P')
+          GOTO NEXT_PROPITEM_RECORD;
+        WHEN (PROPITEM_RECORD.LINEFLAG = 'S')
+          DO;
+            P = SECTION_TOP;
+            DO WHILE (P ^= NULL);
+               IF P-&gtSECTION_NODE.SECTION = PROPITEM_RECORD.SECTION
+                  THEN GOTO NEXT_PROPITEM_RECORD;
+                  ELSE P = P-&gtSECTION_NODE.NEXT_PTR;
+            END;
+          END;
+        WHEN (PROPITEM_RECORD.LINEFLAG = 'L')
+          DO;
+            P = PROPITEM_TOP;
+            DO WHILE (P ^= NULL);
+               IF P-&gtPROPITEM_NODE.LINE = PROPITEM_RECORD.IPLINENO
+                  THEN GOTO NEXT_PROPITEM_RECORD;
+                  ELSE P = P-&gtPROPITEM_NODE.NEXT_PTR;
+            END;
+          END;
+        OTHERWISE
+          CALL FATAL_ERROR ('PROGRAM', 
+               'PROPITEM WITH INVALID LINEFLAG &quot' || 
+               PROPITEM_RECORD.LINEFLAG || '&quot FOUND.');
+      END;  /*--- SELECT ---*/
+
+
+      PROPITEM_KEY = PROPITEM_RECORD.CONTID   ||
+                     PROPITEM_RECORD.LINEFLAG ||
+                     PROPITEM_RECORD.IPLINENO;
+     
+     ITRC = ITDEL ('PROPITEM', PROPITEM_KEY, '', '');
+     IF ITRC = 10
+        THEN CALL FATAL_ERROR ('PROGRAM', 'PROPITEM TABLE IS NOT ' ||
+                               'OPENED IN WRITE MODE');
+        ELSE IF ITRC = 8
+                THEN CALL FATAL_ERROR ('PROGRAM', 'SPECIFIED PROPITEM '
+                               || 'ROW IS NOT FOUND');
+
+      NEXT_PROPITEM_RECORD:
+     
+      ITRC = ITREAD('PROPITEM','','',SQLOC);
+      IF ITRC=8
+         THEN PROPITEM_FOUND = '0'B;
+     
+   END;
+     
+   SKIP_DELETE:
+     
+   SUM_EXTAMT = 0;
+     
+   /*--- FOR EACH PROPOSAL ITEM ON PROPOSAL ITEM LIST ---*/
+   /*--- CREATE A PROPITEM RECORD                     ---*/
+     
+     
+   PI = PROPITEM_TOP;
+   DO WHILE (PI ^= NULL);
+     
+     PROPITEM_RECORD.CONTID   = CONTID;
+     PROPITEM_RECORD.LINEFLAG = 'L';
+     PROPITEM_RECORD.IPLINENO = PI -&gt PROPITEM_NODE.LINE;
+     PROPITEM_RECORD.PRICE    = PI -&gt PROPITEM_NODE.PRICE;
+     PROPITEM_RECORD.QTY      = PI -&gt PROPITEM_NODE.QTY;
+     PROPITEM_RECORD.PIEXTAMT = PI -&gt PROPITEM_NODE.EXTAMT;
+     PROPITEM_RECORD.PIALT    = PI -&gt PROPITEM_NODE.IALT;
+     PROPITEM_RECORD.PICNALT  = PI -&gt PROPITEM_NODE.CNALT;
+     
+     IF PI -&gt PROPITEM_NODE.LOWCOST
+        THEN PROPITEM_RECORD.PILOWCST = 'Y';
+        ELSE PROPITEM_RECORD.PILOWCST = 'N';
+     
+     /*--- SUM EXTENDED AMOUNTS FOR LOW COST ITEMS  ---*/
+     IF PI -&gt PROPITEM_NODE.LOWCOST
+        THEN SUM_EXTAMT = SUM_EXTAMT + PI -&gt PROPITEM_NODE.NEXTAMT;
+     
+     IF PI -&gt PROPITEM_NODE.LUMPSUM
+<A NAME="FREE_ITEM_AND_ALT_LISTS"></A>        THEN PROPITEM_RECORD.PILUMP = 'Y';
+        ELSE PROPITEM_RECORD.PILUMP = 'N';
+     
+     IF PI -&gt PROPITEM_NODE.HYB_LUMPSUM
+        THEN PROPITEM_RECORD.PIHYBRID = 'Y';
+        ELSE PROPITEM_RECORD.PIHYBRID = 'N';
+     
+     PROPITEM_RECORD.SECTION  = PI -&gt PROPITEM_NODE.SECTION;
+     PROPITEM_RECORD.PRPITEM  = PI -&gt PROPITEM_NODE.ITEM;
+     PROPITEM_RECORD.PIPCN    = PI -&gt PROPITEM_NODE.PCN;
+     PROPITEM_RECORD.PICATG   = PI -&gt PROPITEM_NODE.CN;
+     PROPITEM_RECORD.PISUPDES = PI -&gt PROPITEM_NODE.SUPDES;
+     PROPITEM_RECORD.PIFIXED  = PI -&gt PROPITEM_NODE.FIXED_FLG;
+     PROPITEM_RECORD.PIPRPDES = PI -&gt PROPITEM_NODE.PIPRPDES;
+     PROPITEM_RECORD.PISUPDE2 = PI -&gt PROPITEM_NODE.SUPDES2;
+     
+     
+     ITRC = ITWRITE ('PROPITEM','');
+     
+     PI = PI -&gt PROPITEM_NODE.NEXT_PTR;
+     
+   END;
+     
+   /*--- FOR EACH SECTION ON SECTION LIST ---*/
+   /*--- CREATE A PROPITEM RECORD         ---*/
+   S = SECTION_TOP;
+   DO WHILE (S ^= NULL);
+     
+     PROPITEM_RECORD.CONTID   = CONTID;
+     PROPITEM_RECORD.LINEFLAG = 'S';
+     PROPITEM_RECORD.IPLINENO = S -&gt SECTION_NODE.SECTION;
+     PROPITEM_RECORD.PRICE    = '       000000';
+     PROPITEM_RECORD.QTY      = '        0000';
+     PROPITEM_RECORD.PIEXTAMT = S -&gt SECTION_NODE.EXTAMT;
+     PROPITEM_RECORD.PIALT    = S -&gt SECTION_NODE.IALT;
+     PROPITEM_RECORD.PICNALT  = S -&gt SECTION_NODE.CNALT;
+     PROPITEM_RECORD.PILOWCST = ' ';
+     PROPITEM_RECORD.PILUMP   = 'N';
+     PROPITEM_RECORD.PIHYBRID = 'N';
+     PROPITEM_RECORD.SECTION  = S -&gt SECTION_NODE.SECTION;
+     PROPITEM_RECORD.PRPITEM  = ' ';
+     PROPITEM_RECORD.PIPCN    = ' ';
+     PROPITEM_RECORD.PICATG   = ' ';
+     PROPITEM_RECORD.PISUPDES = ' ';
+     PROPITEM_RECORD.PIFIXED  = ' ';
+     PROPITEM_RECORD.PIPRPDES = ' ';
+     PROPITEM_RECORD.PISUPDE2 = ' ';
+     
+     PROPITEM_KEY = PROPITEM_RECORD.CONTID   ||
+                    PROPITEM_RECORD.LINEFLAG ||
+<A NAME="DUMP_SECTION_LIST"></A>                    PROPITEM_RECORD.IPLINENO;
+     
+     
+     ITRC = ITWRITE ('PROPITEM','');
+     
+     S = S -&gt SECTION_NODE.NEXT_PTR;
+     
+   END;
+     
+     
+   /*--- CREATE A PROPITEM RECORD FOR PROPOSAL TOTAL ---*/
+     
+      PROP_EXTAMT = D11V2$C(SUM_EXTAMT);
+     
+   PROPITEM_RECORD.CONTID   = CONTID;
+   PROPITEM_RECORD.LINEFLAG = 'P';
+   PROPITEM_RECORD.IPLINENO = ' ';
+   PROPITEM_RECORD.PRICE    = '       000000';
+   PROPITEM_RECORD.QTY      = '        0000';
+   PROPITEM_RECORD.PIEXTAMT = PROP_EXTAMT;
+   PROPITEM_RECORD.PIALT    = ' ';
+   PROPITEM_RECORD.PICNALT  = ' ';
+   PROPITEM_RECORD.PILOWCST = ' ';
+   PROPITEM_RECORD.PILUMP   = 'N';
+   PROPITEM_RECORD.PIHYBRID = 'N';
+   PROPITEM_RECORD.SECTION  = ' ';
+   PROPITEM_RECORD.PRPITEM  = ' ';
+   PROPITEM_RECORD.PIPCN    = ' ';
+   PROPITEM_RECORD.PICATG   = ' ';
+   PROPITEM_RECORD.PISUPDES = ' ';
+   PROPITEM_RECORD.PIFIXED  = ' ';
+   PROPITEM_RECORD.PIPRPDES = ' ';
+   PROPITEM_RECORD.PISUPDE2 = ' ';
+     
+   PROPITEM_KEY = PROPITEM_RECORD.CONTID   ||
+                  PROPITEM_RECORD.LINEFLAG ||
+                  PROPITEM_RECORD.IPLINENO;
+     
+     
+<A NAME="DUMP_ADDITEM_LIST"></A>   ITRC = ITWRITE ('PROPITEM','');
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END CREATE_PROPITEM_RECORDS;
+     
+ /*-------------------------------------------------------------------*/
+ /*                       FREE_PROPITEM_AND_ALT_LISTS                 */
+ /*                                                                   */
+ /*   FREE THE PROPITEM, ESTIMATE ITEM, ITEM ALTERNATE, AND CATEGORY  */
+ /*   ALTERNATE LISTS, AND SECTION LIST                               */
+ /*-------------------------------------------------------------------*/
+     
+ FREE_ITEM_AND_ALT_LISTS: PROC;
+     
+   DCL SAVE_SEGMENT  CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'FREE_ITEM_AND_ALT_LISTS';
+     
+   DO WHILE (PROPITEM_TOP ^= NULL);
+      PI = PROPITEM_TOP-&gtPROPITEM_NODE.NEXT_PTR;
+      FREE PROPITEM_TOP-&gtPROPITEM_NODE;
+      PROPITEM_TOP = PI;
+   END;
+     
+   DO WHILE (ESTITEM_TOP ^= NULL);
+      EI = ESTITEM_TOP -&gt ESTITEM_NODE.NEXT_PTR;
+      FREE ESTITEM_TOP -&gt ESTITEM_NODE;
+      ESTITEM_TOP = EI;
+   END;
+     
+   DO WHILE (CNALT_TOP ^= NULL);
+      T = CNALT_TOP-&gtCNALT_NODE.NEXT_PTR;
+      FREE CNALT_TOP-&gtCNALT_NODE;
+      CNALT_TOP = T;
+   END;
+     
+   DO WHILE (IALT_TOP ^= NULL);
+      T = IALT_TOP-&gtIALT_NODE.NEXT_PTR;
+      FREE IALT_TOP-&gtIALT_NODE;
+      IALT_TOP = T;
+   END;
+     
+   DO WHILE (SECTION_TOP ^= NULL);
+      S = SECTION_TOP -&gt SECTION_NODE.NEXT_PTR;
+      FREE SECTION_TOP -&gt SECTION_NODE;
+      SECTION_TOP = S;
+<A NAME="DUMP_ITEM_LISTS"></A>   END;
+     
+   DO WHILE (ADDITEM_TOP ^= NULL);
+      A = ADDITEM_TOP -&gt ADDITEM_NODE.NEXT_PTR;
+      FREE ADDITEM_TOP -&gt ADDITEM_NODE;
+      ADDITEM_TOP = A;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END FREE_ITEM_AND_ALT_LISTS;
+     
+ /*-------------------------------------------------------------------*/
+ /*                         DUMP SECTION LIST                         */
+ /*-------------------------------------------------------------------*/
+ DUMP_SECTION_LIST:  PROC;
+     
+   DCL DUMP      FILE,
+       P         POINTER;
+     
+   OPEN FILE (DUMP) STREAM OUTPUT;
+     
+   PUT FILE (DUMP) SKIP EDIT ('SECTION LIST') (A);
+     
+   PUT FILE (DUMP) SKIP;
+     
+   IF SECTION_TOP = NULL
+      THEN DO;
+        PUT FILE (DUMP) SKIP EDIT ('&ltEMPTY&gt') (A);
+        GOTO END_SECTION_DUMP;
+      END;
+     
+   PUT FILE (DUMP) SKIP EDIT ('SECTION','AMOUNT')
+          (COL(1),A,COL(17),A);
+   PUT FILE (DUMP) SKIP;
+     
+   P = SECTION_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT (P -&gt SECTION_NODE.SECTION,
+                                P -&gt SECTION_NODE.EXTAMT)
+          (COL(1),A,COL(17),A);
+      P = P -&gt SECTION_NODE.NEXT_PTR;
+   END;
+     
+   END_SECTION_DUMP:
+     
+   CLOSE FILE (DUMP);
+     
+ END DUMP_SECTION_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                       DUMP ADDITEM LISTS                          */
+ /*-------------------------------------------------------------------*/
+ DUMP_ADDITEM_LIST: PROC;
+     
+   DCL DUMP      FILE,
+       P         POINTER;
+     
+   OPEN FILE (DUMP)
+        STREAM OUTPUT;
+     
+   PUT FILE (DUMP) SKIP EDIT ('ADDITEM LIST') (A);
+     
+   PUT FILE (DUMP) SKIP;
+     
+   IF ADDITEM_TOP = NULL
+      THEN DO;
+        PUT FILE (DUMP) SKIP EDIT ('&ltEMPTY&gt') (A);
+        GOTO END_DUMP;
+      END;
+     
+   PUT FILE (DUMP) SKIP EDIT ('PCN','CN','ELIN','ACT','PLIN','ITEM',
+                              'QTY','PRICE')
+          (COL(1),A,COL(15),A,COL(21),A,COL(27),A,COL(33),A,COL(38),
+           COL(52),A,COL(75),A);
+   PUT FILE (DUMP) SKIP;
+     
+   P = ADDITEM_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT (P -&gt ADDITEM_NODE.PCN,
+                                P -&gt ADDITEM_NODE.CN,
+                                P -&gt ADDITEM_NODE.IELINENO,
+                                P -&gt ADDITEM_NODE.ACTION,
+                                P -&gt ADDITEM_NODE.IPLINENO,
+                                P -&gt ADDITEM_NODE.ITEM,
+                                P -&gt ADDITEM_NODE.IQTY,
+                                P -&gt ADDITEM_NODE.IPRICE)
+          (COL(1),A,COL(15),A,COL(21),A,COL(27),A,COL(33),A,COL(38),
+           COL(52),A,COL(75),A);
+      P = P -&gt ADDITEM_NODE.NEXT_PTR;
+   END;
+     
+   END_DUMP:
+     
+   CLOSE FILE (DUMP);
+     
+ END DUMP_ADDITEM_LIST;
+     
+ /*-------------------------------------------------------------------*/
+ /*                 DUMP ESTIMATE AND PROPOSAL ITEM LISTS             */
+<A NAME="DUMP_ALT_LISTS"></A> /*-------------------------------------------------------------------*/
+ DUMP_ITEM_LISTS: PROC;
+     
+   DCL DUMP      FILE,
+       P         POINTER;
+     
+   OPEN FILE (DUMP)
+        STREAM OUTPUT;
+     
+   PUT FILE (DUMP) SKIP EDIT ('ESTIMATE ITEM LIST') (A);
+     
+   PUT FILE (DUMP) SKIP;
+     
+   IF ESTITEM_TOP = NULL
+      THEN DO;
+        PUT FILE (DUMP) SKIP EDIT ('&ltEMPTY&gt') (A);
+        GOTO DUMP_PROPOSAL_ITEM_LIST;
+      END;
+     
+   PUT FILE (DUMP) SKIP EDIT ('PCN','CN','ELIN','SECT','PLIN','QTY',
+                      'PRICE','LUMP','HYB','CNALT','IALT','RPRICE')
+          (COL(1),A,COL(15),A,COL(21),A,COL(27),A,COL(33),A,COL(38),
+           COL(52),A,COL(67),A,COL(71),A,COL(77),A,COL(82),A,COL(88),A);
+   PUT FILE (DUMP) SKIP;
+     
+   P = ESTITEM_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT (P -&gt ESTITEM_NODE.PCN,
+                                P -&gt ESTITEM_NODE.CN,
+                                P -&gt ESTITEM_NODE.IELINENO,
+                                P -&gt ESTITEM_NODE.SECTION,
+                                P -&gt ESTITEM_NODE.LINE,
+                                P -&gt ESTITEM_NODE.QTY,
+                                P -&gt ESTITEM_NODE.PRICE,
+                                P -&gt ESTITEM_NODE.LUMPSUM,
+                                P -&gt ESTITEM_NODE.HYB_LUMPSUM,
+                                P -&gt ESTITEM_NODE.CNALT,
+                                P -&gt ESTITEM_NODE.IALT,
+                                P -&gt ESTITEM_NODE.PRICER,
+                                P -&gt ESTITEM_NODE.IPRPDES)
+          (COL(1),A,COL(15),A,COL(21),A,COL(27),A,COL(33),A,COL(38),
+           COL(52),A,COL(67),A,COL(71),A,COL(77),A,COL(82),A,COL(88),
+           A,COL(100),
+           A);
+      P = P -&gt ESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   DUMP_PROPOSAL_ITEM_LIST:
+     
+   PUT FILE (DUMP) SKIP;
+   PUT FILE (DUMP) SKIP;
+     
+   PUT FILE (DUMP) SKIP EDIT ('PROPOSAL ITEM LIST') (A);
+     
+   PUT FILE (DUMP) SKIP;
+     
+   IF PROPITEM_TOP = NULL
+      THEN DO;
+        PUT FILE (DUMP) SKIP EDIT ('&ltEMPTY&gt') (A);
+        CLOSE FILE (DUMP);
+        RETURN;
+      END;
+     
+   PUT FILE (DUMP) SKIP EDIT ('SECT','LINE','QTY','PRICE',
+                              'LUMP','PCN','HYB','EXTAMT','LITEM',
+                              'CNALT','IALT','CN','RPRI')
+      (COL(1),A,COL(7),A,COL(13),A,COL(29),A,COL(45),A,COL(50),A,
+       COL(65),A,COL(70),A,COL(85),A,COL(95),A,COL(105),A,COL(110),A,
+       COL(116),A);
+   PUT FILE (DUMP) SKIP;
+     
+   P = PROPITEM_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT (P -&gt PROPITEM_NODE.SECTION,
+                                P -&gt PROPITEM_NODE.LINE,
+                                P -&gt PROPITEM_NODE.QTY,
+                                P -&gt PROPITEM_NODE.PRICE,
+                                P -&gt PROPITEM_NODE.LUMPSUM,
+                                P -&gt PROPITEM_NODE.PCN,
+                                P -&gt PROPITEM_NODE.HYB_LUMPSUM,
+                                P -&gt PROPITEM_NODE.EXTAMT,
+                                P -&gt PROPITEM_NODE.LOWCOST,
+                                P -&gt PROPITEM_NODE.CNALT,
+                                P -&gt PROPITEM_NODE.IALT,
+                                P -&gt PROPITEM_NODE.CN,
+                                P -&gt PROPITEM_NODE.PIPRPDES)
+      (COL(1),A,COL(7),A,COL(13),A,COL(29),A,COL(45),A,COL(50),A,
+       COL(65),A,COL(70),A,COL(85),A,COL(95),A,COL(105),A,COL(110),A,
+       COL(115),
+       A);
+     
+      P = P -&gt PROPITEM_NODE.NEXT_PTR;
+   END;
+     
+   CLOSE FILE (DUMP);
+     
+ END DUMP_ITEM_LISTS;
+     
+ /*-------------------------------------------------------------------*/
+ /*                            DUMP_ALT_LISTS                         */
+ /*                                                                   */
+ /*          DUMP THE ITEM ALTERNATE AND CATEGORY ALTERNATE LISTS     */
+ /*-------------------------------------------------------------------*/
+     
+ DUMP_ALT_LISTS: PROC (CNALT_TOP,IALT_TOP);
+     
+   DCL SAVE_SEGMENT             CHAR (31),
+      (CNALT_TOP, IALT_TOP, P)  POINTER,
+       DUMP                     FILE;
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'DUMP_ALT_LISTS';
+     
+   OPEN FILE (DUMP)
+        STREAM OUTPUT;
+     
+   IF CNALT_TOP = NULL
+      THEN DO;
+        PUT FILE(DUMP) SKIP(2) EDIT
+                       ('CATEGORY ALTERNATE LIST IS EMPTY') (A);
+        GOTO ITEM_DUMP;
+      END;
+     
+   PUT FILE(DUMP) SKIP(2) EDIT ('CATEGORY ALTERNATE LIST') (A);
+     
+   P = CNALT_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT
+         (P-&gtCNALT_NODE.CNALT,
+          P-&gtCNALT_NODE.LOWCOST,
+          P-&gtCNALT_NODE.COST)
+         (A,COL(5),A,COL(8),F(11,3));
+      P = P-&gtCNALT_NODE.NEXT_PTR;
+   END;
+     
+   ITEM_DUMP:
+     
+   IF IALT_TOP = NULL
+      THEN DO;
+        PUT FILE(DUMP) SKIP(2) EDIT
+                         ('ITEM ALTERNATE LIST IS EMPTY') (A);
+     
+        RETURN;
+      END;
+     
+   PUT FILE(DUMP) SKIP(2) EDIT ('ITEM ALTERNATE LIST') (A);
+     
+   P = IALT_TOP;
+   DO WHILE (P ^= NULL);
+      PUT FILE(DUMP) SKIP EDIT
+         (P-&gtIALT_NODE.IALT,
+          P-&gtIALT_NODE.LOWCOST,
+          P-&gtIALT_NODE.COST)
+         (A,COL(5),A,COL(8),F(11,3));
+      P = P-&gtIALT_NODE.NEXT_PTR;
+   END;
+     
+   CLOSE FILE (DUMP);
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END DUMP_ALT_LISTS;
+     
+ END <A HREF="bldpitm.htm#BLDPITM">BLDPITM</A>;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

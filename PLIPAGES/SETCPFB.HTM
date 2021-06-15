@@ -1,0 +1,103 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\setcpfb.pli"></A> /*-------------------------------------------------------------------*/
+ /*                                                                   */
+ /*   SETCPFB - SET CONTPROJ FIELDBOOK FLAG TO &quotN&quot                    */
+ /*                                                                   */
+ /*   THIS PROGRAM SETS THE CONTPROJ.CPRES2 FIELD FOR ALL RECORDS     */
+ /*   TO &quotN&quot.  THE PROGRAM REQUIRES EXCLUSIVE ACCESS TO THE CONTPROJ  */
+ /*   FILE.                                                           */
+ /*                                                                   */
+ /*   WRITTEN BY: RTD  10/26/94                                       */
+ /*   MODIFIED BY : PCGW 95/06/12                                     */
+ /*                                                                   */
+ /*-------------------------------------------------------------------*/
+
+ SETCPFB: PROC OPTIONS (MAIN);
+
+  %INCLUDE BENVSTP;
+  %INIT_TYPE = 'INTEGRATED';
+  %INCLUDE BTCSTUP;
+
+  SHELL$MODULE_NAME    = 'SETCPFB';
+  SHELL$MODULE_SEGMENT = 'SETUP';
+
+  %INCLUDE CONTPROJ;
+
+  ITRC = ITSET ('LOCK','RETURN');
+
+  DCL EOF      BIT(1) INIT ('0'B),
+      RECORDS  FIXED BIN (31) INIT (0);
+
+  PUT SKIP LIST ('ASSIGNING &quotN&quot DEFAULT VALUE TO ' ||
+                 'ALL CAS PROJECTS...');
+
+  CONTPROJ_RECORD_PTR = ADDR(CONTPROJ_RECORD);
+  ITRC = ITOPEN ('CONTPROJ',CONTPROJ_RECORD_PTR,'WRITE','','',
+                 'LOCK=NOSHARE');
+
+  IF ITRC = 12
+     THEN CALL FATAL_ERROR ('PROGRAM',
+          'UNABLE TO OBTAIN EXCLUSIVE ACCESS TO THE CONTPROJ FILE');
+
+  IF ITRC ^= 0
+     THEN CALL FATAL_ERROR ('PROGRAM',
+          'OPEN OF CONTPROJ FILE FAILED WITH RETURN CODE ' ||
+          TRIM(CHARACTER(ITRC)));
+
+  ITRC = ITREAD ('CONTPROJ','','','');
+  EOF = (ITRC = 8);
+
+  DO WHILE (^EOF);
+
+     RECORDS = RECORDS + 1;
+
+     /* MODIFIED CPRES1 TO CPRES2 AND 'E' TO 'N' */
+     CONTPROJ_RECORD.CPRES2 = 'N';
+
+     ITRC = ITWRITE ('CONTPROJ','');
+
+     IF ITRC ^= 0
+        THEN CALL FATAL_ERROR ('PROGRAM',
+             'ITWRITE TO UPDATE CONTPROJ FAILED WITH RETURN CODE ' ||
+             TRIM(CHARACTER(ITRC)));
+
+     ITRC = ITREAD ('CONTPROJ','','','');
+     EOF = (ITRC = 8);
+  END;
+
+  ITRC = ITCLOSE ('CONTPROJ',' ');
+
+  PUT SKIP LIST (' ');
+
+  PUT SKIP LIST ('&quotN&quot FIELDBOOK DEFAULT VALUE ASSIGNED TO ' ||
+                 TRIM(CHARACTER(RECORDS)) ||
+                 ' CAS PROJECTS.');
+
+ END SETCPFB;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

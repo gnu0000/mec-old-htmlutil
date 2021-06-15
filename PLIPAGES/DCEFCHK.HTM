@@ -1,0 +1,417 @@
+<HTML>
+<HEAD>
+<TITLE>test\dcefchk.pli</TITLE>
+</HEAD>
+<BODY>
+<H1>test\dcefchk.pli</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\dcefchk.pli"></A>&ltHTML&gt
+&ltBODY&gt
+&ltPRE&gt
+ /*==================================================================*/
+ /*                                                                  */
+ /*       DCEFCHK : PERFORM EDIT CHECKS ON FUNDING                   */
+ /*                                                                  */
+ /*       ORIGINAL AUTHOR : CJB   10/12/87                           */
+ /*       1.0 CONVERSION  : GNC                                      */
+ /*       2.0 (IBM)       :                                          */
+ /*       2.0 (VAX)       : KLS   03/10/89                           */
+ /*                                                                  */
+ /*-------------------- PROGRAM MODIFICATION HISTORY ----------------*/
+ /*                                                                  */
+ /*       MODIFIED BY : PCG 05/20/90                                 */
+ /*                     THE ONLY FUND CHECKING DONE NOW IS THE       */
+ /*                     FUNDING ALLOCATION CHECK TO MAKE SURE        */
+ /*                     THE TOTAL PERCENT FUNDED IS 100 PERCENT.     */
+ /*                     ALL OTHER CHECKS AND VERIFICATIONS ARE       */
+ /*                     DONE IN DCELOAD.                             */
+ /*                                                                  */
+ /*                     TPS 10/25/90                                 */
+ /*                     Added preprocessor statements for debugging  */
+ /*                                                                  */
+ /*                     TPS 11/12/90                                 */
+ /*                     ADDED CHECK FOR PAGESIZE TO CORRECTLY        */
+ /*                     IMPLEMENT PAGESIZE OPTION.                   */
+ /*                                                                  */
+ /*==================================================================*/
+ DCEFCHK: PROC OPTIONS (MAIN);
+
+
+    /*****************************************/
+    /*                                       */
+    /* These two statements will determine   */
+    /* if the module is compiled for testing */
+    /* or production.  In production mode    */
+    /* the preprocessor variable is set to   */
+    /* 'OFF', while during testing it is 'ON'*/
+    /*                                       */
+    /*****************************************/
+   %DCL DEBUGGER CHARACTER;
+   %DEBUGGER = 'OFF';
+
+   %INCLUDE BENVSTP;
+
+   %INIT_TYPE = 'INTEGRATED';
+
+   %INCLUDE BTCSTUP;
+
+   /* %INCLUDE DCEFCHKO; */
+   %INCLUDE PGPDEBO;
+
+   SHELL$MODULE_NAME    = 'DCE_CHECKS';
+   SHELL$MODULE_SEGMENT = 'SETUP';
+
+   ITRC = ITSET ('LOCK','FATAL');
+   ITRC = ITSET ('TNF' ,'FATAL');
+
+   %IF DEBUGGER = 'ON'
+       %THEN %DO;
+          ITRC = ITSET ('TRACE','ON');
+       %END;
+
+
+   %INCLUDE DCEFILES;
+
+   DCL EXCEPTION                        FILE PRINT,
+       CURRENT_PCN                      CHAR (13),
+       (MESSAGE)                        CHAR (512) VARYING,
+       FIRST_PAGE                       BIT (1) INIT ('1'B),
+       ERROR                            BIT (1) INIT ('0'B),
+       DATE                             BUILTIN,
+       (DECATG_FOUND,DEITEM_FOUND,
+        DEPROJ_FOUND,DEFUND_FOUND,
+        OVERFLOW)                       BIT (1);
+
+   DCL ZERO_CATEGORY CHAR (4) INIT ('0000');
+
+   ON FIXEDOVERFLOW OVERFLOW = '1'B;
+
+   %IF PREPROC$OPSYS = 'VMS'
+       %THEN %DO;
+            OPEN FILE (EXCEPTION)
+                 PAGESIZE (INSTOPT_PAGESIZE_OUTPUT1)
+                 ENVIRONMENT (APPEND);/* PGPDEBO - NOT DCEFCHKO */
+       %END;
+       %ELSE %DO;
+             OPEN FILE (EXCEPTION);
+        %END;
+
+   CALL EXCEPTION_HEADER;
+
+   GPDECATG_RECORD_PTR = ADDR(GPDECATG_RECORD);
+   ITRC = ITOPEN ('GPDECATG', GPDECATG_RECORD_PTR, 'READ',
+                  '', '', 'LIBRARY=TEMPTABL');
+
+   GPDEFUND_RECORD_PTR = ADDR(GPDEFUND_RECORD);
+   ITRC = ITOPEN ('GPDEFUND', GPDEFUND_RECORD_PTR, 'READ',
+                  '', '', 'LIBRARY=TEMPTABL');
+
+   GPDEPROJ_RECORD_PTR = ADDR(GPDEPROJ_RECORD);
+   ITRC = ITOPEN ('GPDEPROJ  ', GPDEPROJ_RECORD_PTR, 'READ',
+                  '', '', 'LIBRARY=TEMPTABL');
+
+   DEPROJ_FOUND = '1'B;
+   DEPROJ_KEY = ' ';
+   ITRC = ITREAD ('GPDEPROJ', DEPROJ_KEY, '', 'GE');
+   IF ITRC = 8
+      THEN DEPROJ_FOUND = '0'B;
+
+   /*--- CHECK FUNDING RECORDS FOR EACH PROJECT ---*/
+
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CHECKING FUNDING RECORDS ',
+                              'FOR EACH PROJECT');
+           %END;
+
+   DO WHILE (DEPROJ_FOUND);
+
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CALL CONVERT_GPDEPROJ_TO_DEPROJ');
+           %END;
+
+      CALL CONVERT_GPDEPROJ_TO_DEPROJ;
+
+      CURRENT_PCN = DEPROJ_RECORD.PCN;
+
+      CALL CHECK_FUNDING;
+
+      ITRC = ITREAD ('GPDEPROJ', '', '', '');
+      IF ITRC = 8
+         THEN DEPROJ_FOUND = '0'B;
+
+   END;
+
+   REVERT FIXEDOVERFLOW;
+
+   IF ^ERROR
+      THEN PUT SKIP(2) FILE (EXCEPTION) EDIT
+               ('****** NO ERRORS ENCOUNTERED ' ||
+                'IN SPECIFIED FUNDING ******')
+               (COL(38),A);
+
+   ITRC = ITCLOSE ('GPDECATG', 'LIBRARY=TEMPTABL');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('GPDECATG TABLE NOT OPEN');
+
+   ITRC = ITCLOSE ('GPDEFUND', 'LIBRARY=TEMPTABL');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('GPDEFUND TABLE NOT OPEN');
+
+   ITRC = ITCLOSE ('GPDEPROJ', 'LIBRARY=TEMPTABL');
+   IF ITRC = 12
+      THEN CALL NON_FATAL_ERROR ('GPDEPROJ TABLE NOT OPEN');
+
+   CLOSE FILE (EXCEPTION);
+
+
+ /*------------------------------------------------------------------*/
+ /*                           CHECK_FUNDING                          */
+ /*                                                                  */
+ /* CHECK THAT FUNDING FOR A PRIORITY DOES NOT EXCEED 100%.          */
+ /*------------------------------------------------------------------*/
+ CHECK_FUNDING:     PROC;
+
+   DCL SAVE_SEGMENT         CHAR (31),
+       CURRENT_PRIORITY     CHAR (1),
+       TOTAL_PCT            FIXED DEC (5,2);
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'CHECK_FUNDING';
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('INSIDE PROCEDURE ',
+                              TRIM(SHELL$MODULE_SEGMENT));
+           %END;
+
+   /*--- FOR EACH FUND FOR THE PROJECT - DETERMINE IF THE TOTAL   ---*/
+   /*--- FUNDING PERCENTAGE SPECIFIED FOR THE FUND EXCEEDS 100%.  ---*/
+   /*--- HAVE TWO LOOPS FOR THE FUND FILE TO ENABLE THE SUMMATION ---*/
+   /*--- OF THE SAME PRIORITIES WITHIN THE SAME CATEGORY. NOTE THE---*/
+   /*--- LACK OF A FUND FILE SEQUENTIAL READ FOR THE OUTER LOOP.  ---*/
+   /*--- THIS IS BECAUSE THE NEXT FUND RECORD WILL BE READ        ---*/
+   /*--- WITHIN THE INNER LOOP.                                   ---*/
+
+   DECATG_FOUND = '1'B;
+   DECATG_KEY   = CURRENT_PCN;
+
+   ITRC = ITREAD ('GPDECATG', DECATG_KEY, '', 'GE');
+   IF ITRC = 8
+      THEN DECATG_FOUND = '0'B;
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CALL CONVERT_GPDECATG_TO_DECATG');
+           %END;
+
+   CALL CONVERT_GPDECATG_TO_DECATG;
+
+   DO WHILE (DECATG_FOUND &amp DECATG_RECORD.PCN = CURRENT_PCN);
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('IST WHILE, ALL CATGS OF CURRENT_PCN');
+           %END;
+
+      DEFUND_FOUND = '1'B;
+      DEFUND_KEY_1 = CURRENT_PCN || DECATG_RECORD.UNITNO ||
+                     DECATG_RECORD.CN;
+
+      ITRC = ITREAD ('GPDEFUND', DEFUND_KEY_1, '1', 'GE');
+      IF ITRC = 8
+         THEN DEFUND_FOUND = '0'B;
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CALL CONVERT_GPDEFUND_TO_DEFUND');
+           %END;
+
+      CALL CONVERT_GPDEFUND_TO_DEFUND;
+
+      DO WHILE (DEFUND_FOUND &amp DEFUND_RECORD.PCN = CURRENT_PCN &amp
+                DEFUND_RECORD.UNITNO = DECATG_RECORD.UNITNO &amp
+                DEFUND_RECORD.CN = DECATG_RECORD.CN);
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('2ND WHILE, ALL FUNDS OF CURRENT CATG');
+           %END;
+
+         CURRENT_PRIORITY = DEFUND_RECORD.FPRIOR;
+         TOTAL_PCT        = 0;
+
+         DO WHILE (DEFUND_FOUND &amp DEFUND_RECORD.PCN = CURRENT_PCN &amp
+                   DEFUND_RECORD.UNITNO = DECATG_RECORD.UNITNO &amp
+                   DEFUND_RECORD.CN     = DECATG_RECORD.CN &amp
+                   DEFUND_RECORD.FPRIOR = CURRENT_PRIORITY);
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('3RD WHILE, ALL FUNDS OF A PRIORITY');
+           %END;
+
+             TOTAL_PCT = TOTAL_PCT + DEFUND_RECORD.FUNDPCT;
+
+             ITRC = ITREAD ('GPDEFUND', '', '', '');
+             IF ITRC = 8
+                THEN DEFUND_FOUND = '0'B;
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CALL CONVERT_GPDEFUND_TO_DEFUND');
+           %END;
+
+             CALL CONVERT_GPDEFUND_TO_DEFUND;
+
+         END;
+
+         IF TOTAL_PCT &gt 100.00
+            THEN DO;
+              ERROR   = '1'B;
+              MESSAGE = 'TOTAL OF THE FUNDING PERCENTAGES ' ||
+                        'FOR CATEGORY=' ||
+                        DECATG_RECORD.CN || ' PRIORITY=' ||
+                        CURRENT_PRIORITY ||
+                        ' EXCEEDS 100 PERCENT';
+              CALL PRINT_MESSAGE;
+            END;
+
+         IF TOTAL_PCT &lt 100.00
+            THEN DO;
+              ERROR = '1'B;
+              MESSAGE = 'FUNDING PERCENTAGES SPECIFIED ' ||
+                        'FOR CATEGORY=' ||
+                        DECATG_RECORD.CN || ' PRIORITY=' ||
+                        CURRENT_PRIORITY ||
+                        ' DO NOT TOTAL 100 PERCENT';
+              CALL PRINT_MESSAGE;
+            END;
+      END;
+
+      ITRC = ITREAD ('GPDECATG','', '', '');
+      IF ITRC = 8
+         THEN DECATG_FOUND = '0'B;
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('CALL CONVERT_GPDECATG_TO_DECATG');
+           %END;
+
+      CALL CONVERT_GPDECATG_TO_DECATG;
+
+   END;
+
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+
+ END CHECK_FUNDING;
+
+ /*------------------------------------------------------------------*/
+ /*                          EXCEPTION_HEADER                        */
+ /*                                                                  */
+ /*                HEADER ROUTINE FOR EXCEPTION REPORT               */
+ /*------------------------------------------------------------------*/
+ EXCEPTION_HEADER:  PROC;
+
+   DCL SAVE_SEGMENT         CHAR (31);
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'EXCEPTION_HEADER';
+
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('INSIDE PROCEDURE ',
+                              TRIM(SHELL$MODULE_SEGMENT));
+           %END;
+
+ /*   BECAUSE THERE ARE OTHER EXCEPTIONS REPORTED IN DCELOAD
+      IF FIRST PAGE IS NO LONGER CHECKED AND THE EXCEPTION
+      REPORT FOR SPECIFIED FUNDING WILL START ON THE NEXT
+      PAGE ALWAYS.
+
+   IF FIRST_PAGE
+      THEN FIRST_PAGE = '0'B;
+      ELSE PUT FILE (EXCEPTION) PAGE;        */
+
+   PUT FILE (EXCEPTION) PAGE;
+
+   PUT FILE (EXCEPTION) SKIP(3) EDIT
+       ('EXCEPTION REPORT - SPECIFIED FUNDING',
+        'DATE : ',
+        SUBSTR(DATE,3,2) ||
+        SUBSTR(DATE,5,2) ||
+        SUBSTR(DATE,1,2))
+       (COL(48),A,COL(117),A,COL(124),P'99/99/99');
+
+   PUT FILE (EXCEPTION) SKIP EDIT
+       (COPY('-',132)) (A(132));
+
+   PUT FILE (EXCEPTION) SKIP EDIT
+       ('PCN')
+       (COL(10),A);
+
+   PUT FILE (EXCEPTION) SKIP EDIT
+       (COPY('-',132)) (A(132));
+
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+
+ END EXCEPTION_HEADER;
+
+ /*------------------------------------------------------------------*/
+ /*                          PRINT_MESSAGE                           */
+ /*                                                                  */
+ /*   WRITES CURRENT ERROR MESSAGE TO THE EXCEPTION REPORT FILE      */
+ /*------------------------------------------------------------------*/
+ PRINT_MESSAGE:         PROC;
+
+   DCL SAVE_SEGMENT         CHAR (31);
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'PRINT_MESSAGE';
+
+       %IF DEBUGGER = 'ON'
+           %THEN %DO;
+              PUT SKIP LIST ('INSIDE PROCEDURE ',
+                              TRIM(SHELL$MODULE_SEGMENT));
+           %END;
+
+  IF INSTOPT_PAGESIZE_OUTPUT1 - LINENO (EXCEPTION) &lt 4
+      THEN CALL EXCEPTION_HEADER;
+
+   PUT FILE (EXCEPTION) SKIP (2) EDIT
+       (CURRENT_PCN,MESSAGE)
+       (COL(3),A,COL(25),A);
+
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+
+ END PRINT_MESSAGE;
+
+ END DCEFCHK;
+&lt/PRE&gt
+&lt/BODY&gt
+&lt/HTML&gt
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

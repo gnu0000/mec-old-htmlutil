@@ -1,0 +1,145 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\wait_f~1.pli"></A>/*===========================================================================*/
+/*                                                                           */
+/*  WAIT_FOR_FIELDBOOK_IMPORT : Wait for a FieldBook Import File             */
+/*                                                                           */
+/*  Written By: RTD  6/28/95                                                 */
+/*                                                                           */
+/*  Parameters provided by logical names:                                    */
+/*                                                                           */
+/*    FB$IMPORT_DIRECTORY                                                    */
+/*    FB$IMPORT_FILE_MASK                                                    */
+/*    FB$SERVER_PRIMETIME_SLEEP_LENGTH                                       */
+/*    FB$SERVER_PRIMETIME_START_TIME                                         */
+/*    FB$SERVER_PRIMETIME_END_TIME                                           */
+/*    FB$SERVER_OFFHOURS_SLEEP_LENGTH                                        */
+/*                                                                           */
+/*  This program checks the FB$IMPORT_DIRECTORY for files that match         */
+/*  the FB$IMPORT_FILE_MASK.  The program will exit when a file is found.    */
+/*  The program will loop with a sleep interval configured by the logical    */
+/*  names listed above until an import file is found.                        */
+/*                                                                           */
+/*===========================================================================*/
+
+wait_for_fieldbook_import: proc options (main);
+
+  %include batch_environment_dcls;
+  %init_type = 'INTEGRATED';
+
+  %include batch_program_setup;
+
+  shell$module_name    = 'Wait_For_FieldBook_Import';
+  shell$module_segment = 'SETUP';
+
+  dcl import_file_mask         char(512) varying,
+      import_directory char(512) varying,
+      string                   char(512) varying,
+      current_time             char(4),
+      primetime_start_time     char(256) varying,
+      primetime_end_time       char(256) varying,
+      this_is_primetime        bit (1) init ('1'b),
+      sleep_interval           char(13),
+      context                  fixed bin (31),
+      finished                 bit (1) init ('0'b);
+
+  current_time = substr(time(),1,4);
+
+  primetime_start_time = translate_logical ('FB$SERVER_PRIMETIME_START_TIME');
+
+  if primetime_start_time = ''
+     then call fatal_error ('PROGRAM',
+          'FB$SERVER_PRIMETIME_START_TIME logical name is undefined.');
+
+  if current_time &lt substr(primetime_start_time,1,2) || 
+                    substr(primetime_start_time,3,2)
+     then 
+       this_is_primetime = '0'b;
+     else do;
+       primetime_end_time = translate_logical ('FB$SERVER_PRIMETIME_END_TIME');
+
+       if primetime_end_time = ''
+          then call fatal_error ('PROGRAM',
+               'FB$SERVER_PRIMETIME_END_TIME logical name is undefined.');
+
+       if current_time &gt substr(primetime_end_time,1,2) || 
+                         substr(primetime_end_time,3,2)
+          then this_is_primetime = '0'b;
+     end; 
+
+
+  if this_is_primetime
+     then do;
+       string = translate_logical ('FB$SERVER_PRIMETIME_SLEEP_LENGTH');
+       if string = ''
+          then call fatal_error ('PROGRAM',
+               'FB$SERVER_PRIMETIME_SLEEP_LENGTH logical name is undefined.');
+       sleep_interval = string;
+     end;
+     else do;
+       string = translate_logical ('FB$SERVER_OFFHOURS_SLEEP_LENGTH');
+       if string = ''
+          then call fatal_error ('PROGRAM',
+               'FB$SERVER_OFFHOURS_SLEEP_LENGTH logical name is undefined.');
+       sleep_interval = string;
+     end;
+
+  import_file_mask = translate_logical ('FB$IMPORT_FILE_MASK');
+
+  if import_file_mask = ''
+     then call fatal_error ('PROGRAM',
+          'FB$IMPORT_FILE_MASK logical name is undefined.');
+
+  import_directory = translate_logical ('FB$IMPORT_DIRECTORY');
+
+  if import_directory = ''
+     then call fatal_error ('PROGRAM',
+          'FB$IMPORT_DIRECTORY logical name is undefined.');
+
+  begin;
+    dcl file_spec  char(length(import_file_mask)),
+        defdir     char(length(import_directory));
+
+  file_spec = import_file_mask;
+  defdir    = import_directory;
+
+  do while (^finished);
+
+    context = 0;
+
+    string = find_file(file_spec,context,defdir);
+
+    if string ^= ''
+       then finished = '1'b;
+       else call pause (sleep_interval);
+  end;  
+
+  end; /* begin */
+
+end wait_for_fieldbook_import;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

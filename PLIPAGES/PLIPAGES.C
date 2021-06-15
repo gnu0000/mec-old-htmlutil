@@ -1,0 +1,706 @@
+/*
+ *
+ * makehtm.c
+ * Tuesday, 8/27/1996.
+ *
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+#include <GnuType.h>
+#include <GnuFile.h>
+#include <GnuStr.h>
+#include <GnuArg.h>
+#include <GnuMem.h>
+#include <GnuMisc.h>
+#include <GnuDir.h>
+
+typedef struct _lnk
+   {
+   PSZ  pszSrcName;  // string to make a HREF
+   UINT uSrcLen   ;  // len of pszSrcName
+   PSZ  pszFile   ;  // file to point to
+   UINT uLine     ;  // line to point to
+   PSZ  pszGenKey ;  // link key
+   PSZ  pszHREF   ;  // HREF string in pre-build form
+   UINT uHREFLen  ;  // len of pszHREF
+   PSZ  pszScope  ;  // scope string
+   UINT uScopeLen ;  // 
+
+   struct _lnk *leftT;
+   struct _lnk *rightT;
+
+   struct _lnk *leftN;
+   struct _lnk *rightN;
+   } LNK;
+typedef LNK *PLNK;
+
+
+typedef struct _lnks
+   {
+   PLNK plnkT; // tag tree   T=ordered by tag str
+   PLNK plnkN; // name tree  N=ordered by line/file
+   } LNKS;
+typedef LNKS *PLNKS;
+
+
+typedef struct _stack
+   {
+   PSZ pszScope;
+   struct _stack *next;
+   } STACK;
+typedef STACK *PSTACK;
+
+BOOL bDEBUG;
+
+PSTACK pSTK = NULL;
+
+BOOL bCASE;
+CHAR szBUFF  [0x4000];
+CHAR szBUFF2 [0x4000];
+CHAR szCURRENTSCOPE [512] = "";
+
+LNKS lnks;
+UINT uLastCount = 0;
+
+
+
+void Usage (void)
+   {
+   printf ("CPages  PLI Source WEB page creation utility              %s\n\n", __DATE__);
+   printf ("USAGE:  CPAGES [options]\n\n");
+   printf ("WHERE:  [options] are 0 or more of:\n");
+   printf ("            /? ................ This help.\n");
+   printf ("            /Links=file ....... Specify auto link file (def: pli.LNK).\n");
+   printf ("            /Dump ............. Dump all loaded links only.\n");
+   printf ("            /Pre=file ......... Use this HTML prefix file (def: PRE.HTM).\n");
+   printf ("            /Post=file ........ Use this HTML suffix file.(def: POST.HTM).\n");
+   printf ("            /Var=string ....... supply value for @# param.\n");
+   printf ("            /CaseSensitive .... all string compares are case sensitive.\n");
+   printf ("\n");
+   printf ("the prefile and post file can have the following replacable parameters:\n");
+   printf ("      @infile ....... The input file name\n");
+   printf ("      @outfile ...... The output file name\n");
+   printf ("      @infilebase ... The input file name without the extension\n");
+   printf ("      @outfilebase .. The output file name without the extension\n");
+   printf ("      @date ......... todays date\n");
+   printf ("      @time ......... current time\n");
+   printf ("      @0 thru @9 .... The nth /Var parameter specified on cmd line.\n");
+   printf ("\n");
+   printf ("Autolink (CSV) file format is:\n");
+   printf ("stringtolink, DestFile, DestLine\n");
+   printf ("\n");
+   exit (0);
+   }
+
+
+PSZ LoadBuffer (PSZ pszFile)
+   {
+   FILE *fp;
+   UINT uRead;
+
+   if (!(fp = fopen (pszFile, "rt")))
+      Error ("Cannot open input file %s", pszFile);
+   uRead = fread (szBUFF, 1, sizeof(szBUFF)-1, fp);
+   fclose (fp);
+   szBUFF[uRead] = '\0';
+   return strdup (szBUFF);
+   }
+
+
+PSZ BaseName (PSZ psz, PSZ pszFile)
+   {
+   PSZ p;
+
+   p = strrchr (pszFile, '\\');
+   p = (p ? p+1 : pszFile);
+   strcpy (psz, p);
+   if (p = strrchr (psz, '.'))
+      *p = '\0';
+   return psz;
+   }
+
+PSZ MyDate (PSZ psz)
+   {
+   time_t tim;
+
+   tim  = time (NULL);
+   strcpy (psz, ctime (&tim));
+   psz[10] = '\0';
+   return psz;
+   }
+
+PSZ MyTime (PSZ psz)
+   {
+   time_t tim;
+
+   tim  = time (NULL);
+   strcpy (psz, ctime (&tim) + 11);
+   psz[8] = '\0';
+   return psz;
+   }
+
+INT Mystrcmp (PSZ psz1, PSZ psz2)
+   {
+   if (bCASE)
+      return strcmp (psz1, psz2);
+   stricmp (psz1, psz2);
+   }
+
+INT Mystrncmp (PSZ psz1, PSZ psz2, UINT uLen)
+   {
+   if (bCASE)
+      return strncmp (psz1, psz2, uLen);
+   strnicmp (psz1, psz2, uLen);
+   }
+
+/***************************************************************************/
+/*                                                                         */
+/*                                                                         */
+/*                                                                         */
+/***************************************************************************/
+
+void PushScope (PSZ pszScope)
+   {
+   PSTACK pstk;
+
+   if (bDEBUG)
+      printf ("Pushing %s\n", pszScope);
+
+   pstk = calloc (1, sizeof (STACK));
+   pstk->next = pSTK;
+   pstk->pszScope = strdup (pszScope);
+   pSTK = pstk;
+
+   }
+
+void PopScope (PSZ pszScope)
+   {
+   PSTACK pstk;
+
+   if (bDEBUG)
+      printf ("Popping %s\n", pszScope);
+
+   if (!pSTK)
+      Error ("No scope");
+   if (pszScope && *pszScope && stricmp (pszScope, pSTK->pszScope))
+      Error ("Invalid scoping %s : %s", pszScope, pSTK->pszScope);
+
+   pstk = pSTK->next;
+   MemFreeData (pSTK->pszScope);
+   MemFreeData (pSTK);
+   pSTK = pstk;
+   }
+
+
+
+void _gtScope (PSZ pszBuff, PSTACK pstk)
+   {
+   if (!pstk)
+      return;
+   _gtScope (pszBuff, pstk->next);
+   strcat (pszBuff, pstk->pszScope);
+   strcat (pszBuff, ".");
+   }
+
+PSZ GetScope (PSZ psz)
+   {
+   _gtScope (psz, pSTK);
+   return psz;
+   }
+
+
+void GetID (PSZ pszID, PSZ pszSrc)
+   {
+   while (__iscsym(*pszSrc))
+      *pszID++ = *pszSrc++;
+   *pszID++ = '\0';
+   }
+
+
+/*
+ * returns TRUE if scope has changed
+ */
+BOOL ExamineScope (FILE *fpIn, PSZ pszBUFF)
+   {
+   CHAR  szLine2[512];
+   CHAR  szID[512];
+   ULONG ulLine, ulFilePos;
+   PSZ   psz1, psz2, psz3;
+
+   /*--- look for fn start ---*/
+   if (psz1 = strchr (pszBUFF, ':'))
+      {
+      psz2 = StrSkipBy (psz1+1, " \t");
+
+      if (strnicmp (psz2, "PROC", 4))
+         {
+         ulFilePos = ftell (fpIn);
+         FilReadLine (fpIn, szLine2, "", sizeof (szLine2));
+         psz3 = StrSkipBy (szLine2, " \t");
+         fseek (fpIn, ulFilePos, SEEK_SET);
+         if (strnicmp (psz3, "PROC", 4))
+            return FALSE;
+         }
+      psz2 = StrSkipBy (pszBUFF, " \t");
+      ulLine = FilGetLine ();
+      GetID (szID, psz2);
+      if (!*szID)
+         return FALSE;
+      psz1 = StrSkipBy (psz2+strlen(szID), " \t");
+      if (*psz1 != ':')
+         return FALSE;
+      PushScope (szID);
+      return TRUE;
+      }
+
+   /*--- look for fn end ---*/
+   psz1 = StrSkipBy (pszBUFF, " \t");
+   if (strnicmp (psz1, "END", 3))
+      return FALSE;
+   if (psz1[3] != ' ' && psz1[3] != '\t')
+      return FALSE;
+   psz2 = StrSkipBy (psz1+3, " \t");
+   if (!*psz2 || *psz2 == ';')
+      return FALSE;
+   GetID (szID, psz2);
+   PopScope (szID);
+   return TRUE;
+   }
+
+/***************************************************************************/
+
+
+void WriteBlock (FILE *fp, PSZ pszBuff, PSZ pszInFile, PSZ pszOutFile)
+   {
+   CHAR sz[128], szWord[256];
+   PSZ  psz;
+   UINT c;
+
+   for (psz = pszBuff; c = *psz; )
+      {
+      if (c != '@')
+         {
+         fputc (*psz++, fp);
+         continue;
+         }
+      psz++;
+      if (*psz >= '0' && *psz <= '9')
+         fprintf (fp, "%s", ArgGet ("Var", *psz++ - '0'));
+      else if (*psz == '@')
+         fprintf (fp, "@", psz++);
+      else
+         {
+         StrGetIdent (&psz, szWord, FALSE, FALSE);
+         if (!Mystrcmp (szWord, "infile"))
+            fprintf (fp, "%s", pszInFile);
+         else if (!Mystrcmp (szWord, "outfile"))
+            fprintf (fp, "%s", pszOutFile);
+         else if (!Mystrcmp (szWord, "infilebase"))
+            fprintf (fp, "%s", BaseName (sz, pszInFile));
+         else if (!Mystrcmp (szWord, "outfilebase"))
+            fprintf (fp, "%s", BaseName (sz, pszOutFile));
+         else if (!Mystrcmp (szWord, "date"))
+            fprintf (fp, "%s", MyDate (sz));
+         else if (!Mystrcmp (szWord, "time"))
+            fprintf (fp, "%s", MyTime (sz));
+         else
+            fprintf (fp, "@%s", szWord);
+         }
+      }
+   }
+
+
+/***************************************************************************/
+/*                                                                         */
+/*                                                                         */
+/*                                                                         */
+/***************************************************************************/
+
+int TNodeCompare (PLNK plnk, PSZ pszSrc)
+   {
+   int i;
+
+   if (i = Mystrncmp (pszSrc, plnk->pszSrcName, plnk->uSrcLen))
+      return i;
+
+   return Mystrncmp (szCURRENTSCOPE, plnk->pszScope, plnk->uScopeLen);
+   }
+
+
+UINT AddToTTree (PLNK plnkTop, PLNK plnkNew)
+   {
+   PLNK *pplnk;
+   INT  i;
+
+   if (!(i = TNodeCompare (plnkTop, plnkNew->pszSrcName)))
+      return printf ("Duplicate link tag: %s\n", plnkNew->pszSrcName);
+
+   pplnk = (i < 0 ? &(plnkTop->leftT) : &(plnkTop->rightT));
+   if (*pplnk)
+      return AddToTTree (*pplnk, plnkNew);
+   *pplnk = plnkNew;
+   return 0;
+   }
+
+
+UINT AddToNTree (PLNK plnkTop, PLNK plnkNew)
+   {
+   PLNK *pplnk;
+   INT  i;
+
+   if (!(i = (INT)plnkNew->uLine - (INT)plnkTop->uLine))
+      i = Mystrcmp (plnkNew->pszFile, plnkTop->pszFile);
+   pplnk = (i < 0 ? &(plnkTop->leftN) : &(plnkTop->rightN));
+   if (*pplnk)
+      return AddToNTree (*pplnk, plnkNew);
+   *pplnk = plnkNew;
+   return 0;
+   }
+
+
+PLNK FindTNode (PLNK plnkTop, PSZ pszSrc)
+   {
+   INT  i;
+   UINT c;
+
+   if (!plnkTop)
+      return NULL;
+
+   if (!(i = TNodeCompare (plnkTop, pszSrc)))
+      {
+      c = pszSrc[plnkTop->uSrcLen];
+      if (isalnum (c) || c == '_')
+         i = 1;
+      else
+         return plnkTop;
+      }
+   if (i < 0)
+      return FindTNode (plnkTop->leftT, pszSrc);
+   return FindTNode (plnkTop->rightT, pszSrc);
+   }
+
+
+PLNK FindNNode (PLNK plnkTop, PSZ pszFile, UINT uLine)
+   {
+   INT  i;
+
+   if (!plnkTop)
+      return NULL;
+   if (!(i = (INT)uLine - (INT)plnkTop->uLine))
+      if (!(i = Mystrcmp (pszFile, plnkTop->pszFile)))
+         return plnkTop;
+   if (i < 0)
+      return FindNNode (plnkTop->leftN, pszFile, uLine);
+   return FindNNode (plnkTop->rightN, pszFile, uLine);
+   }
+
+
+/***************************************************************************/
+/*                                                                         */
+/*                                                                         */
+/*                                                                         */
+/***************************************************************************/
+
+
+void StoreLink (PPSZ ppsz, PSZ pszFileDir, 
+                UINT uCols, PLNKS plnks, PSZ pszType)
+   {
+   PLNK plnk;
+   CHAR szBuff [256];
+   UINT i;
+
+   if (!(plnk = calloc (1, sizeof (LNK))))
+      Error ("cant malloc");
+   for (i=0; ppsz[1][i]; i++)
+      ppsz[1][i] = tolower (ppsz[1][i]);
+
+   plnk->pszSrcName = ppsz[0];
+   plnk->uSrcLen    = strlen(ppsz[0]);
+
+   sprintf (szBuff, "%s%s", pszFileDir, ppsz[1]);
+   plnk->pszFile    = strdup (szBuff);
+   plnk->uLine      = atoi(ppsz[2]);
+
+   plnk->pszGenKey  = plnk->pszSrcName; // at least for now
+
+   sprintf (szBuff, "<A HREF=\"%s#%s\">%s</A>", 
+                     plnk->pszFile, plnk->pszGenKey, plnk->pszSrcName);
+
+   plnk->pszHREF    = strdup (szBuff);
+   plnk->uHREFLen   = strlen(plnk->pszHREF);
+
+   plnk->pszScope   = ppsz[3];
+   plnk->uScopeLen  = strlen(ppsz[3]);
+
+   MemFreeData (ppsz[1]); 
+   MemFreeData (ppsz[2]); 
+   MemFreeData (ppsz); 
+
+
+   /*--- add to T tree ---*/
+   if (!plnks->plnkT)
+      plnks->plnkT = plnk;
+   else
+      AddToTTree (plnks->plnkT, plnk);
+
+   /*--- add to N tree ---*/
+   if (!plnks->plnkN)
+      plnks->plnkN = plnk;
+   else
+      AddToNTree (plnks->plnkN, plnk);
+   }
+
+
+
+void ReadAutolinkFile (PLNKS plnks, PSZ pszFile, PSZ pszType)
+   {
+   FILE *fp;
+   PPSZ ppsz;
+   PSZ  psz;
+   UINT uCols;
+   CHAR szFileDir[256];
+
+   DirSplitPath (szFileDir, pszFile, DIR_DRIVE | DIR_DIR);
+   while (psz = strchr (szFileDir, '\\'))
+      *psz = '/';
+
+   if (!(fp = fopen (pszFile, "rt")))
+      Error ("Cannot open autolink file %s", pszFile);
+
+   while (FilReadLine (fp, szBUFF, "", sizeof (szBUFF)) != (UINT)-1)
+      {
+      ppsz = StrMakePPSZ  (szBUFF, ",\n", TRUE, TRUE, &uCols);
+      if (uCols < 3 || !ppsz[0] || !ppsz[1] || !ppsz[2])
+         {
+         MemFreePPSZ (ppsz, uCols);
+         continue;
+         }
+      StoreLink (ppsz, szFileDir, uCols, plnks, pszType);
+      }
+   }
+
+
+void DumpLinks (PLNK plnk)
+   {
+   if (!plnk)
+      return;
+
+   DumpLinks (plnk->leftT);
+   printf ("%s:%3.3d %s\n", plnk->pszFile, plnk->uLine, plnk->pszHREF);
+   DumpLinks (plnk->rightT);
+   }
+
+
+/***************************************************************************/
+/*                                                                         */
+/*                                                                         */
+/*                                                                         */
+/***************************************************************************/
+
+
+PLNK MaybeWriteNAME (FILE *fpOut, PLNKS plnks, PSZ pszInFile, PSZ pszOutFile)
+   {
+   PLNK plnk;
+
+   if (plnk = FindNNode (plnks->plnkN, pszOutFile, (UINT)FilGetLine ()))
+      fprintf (fpOut, "<A NAME=\"%s\"></A>", plnk->pszGenKey);
+   return plnk;
+   }
+
+
+int fputHTMLc (UINT c, FILE *fp)
+   {
+   if (c == '<')
+      return fputs ("&lt", fp);
+   if (c == '>')
+      return fputs ("&gt", fp);
+   if (c == '&')
+      return fputs ("&amp", fp);
+   if (c == '"')
+      return fputs ("&quot", fp);
+   return fputc (c, fp);
+   }
+
+
+void WriteWithLinks (FILE *fpOut,   PSZ pszSrc, 
+                     PLNKS plnks,
+                     PSZ pszInFile, PSZ pszOutFile)
+   {
+   PLNK plnk, plnkHold;
+   UINT cPrev;
+   BOOL bWrote;
+
+   /*--- see if there is any NAME records to write ---*/
+   plnkHold = MaybeWriteNAME (fpOut, plnks, pszInFile, pszOutFile);
+
+   /*--- and HREF records to write ---*/
+   cPrev = 0;
+   while (*pszSrc)
+      {
+      bWrote = FALSE;
+      if (isalnum (cPrev) || cPrev == '_')
+         {
+         fputHTMLc (cPrev = *pszSrc++, fpOut);
+         continue;
+         }
+
+      if (!(plnk = FindTNode (plnks->plnkT, pszSrc)))
+         {
+         fputHTMLc (cPrev = *pszSrc++, fpOut);
+         continue;
+         }
+
+      /*--- we now know we have a valid, isolated link ---*/
+      if (plnk != plnkHold)
+         {
+         fprintf (fpOut, plnk->pszHREF);
+         pszSrc  += plnk->uSrcLen;
+         cPrev = 0;
+         bWrote = TRUE;
+         }
+
+      else
+         {
+         fputHTMLc (cPrev = *pszSrc++, fpOut);
+         }
+      }
+   }
+
+
+void WriteBody (FILE  *fpOut,    FILE *fpIn, 
+                PLNKS plnks, 
+                PSZ   pszInFile, PSZ pszOutFile)
+   {
+   FilSetLine (0);
+   fprintf (fpOut, "<A NAME=\"%s\"></A>", pszInFile);
+   while (FilReadLine (fpIn, szBUFF, "", sizeof (szBUFF)) != (UINT)-1)
+      {
+      if (ExamineScope (fpIn, szBUFF))
+         GetScope (szCURRENTSCOPE);
+      WriteWithLinks (fpOut, szBUFF, plnks, pszInFile, pszOutFile);
+      fprintf (fpOut, "\n");
+      }
+   }
+
+
+UINT ProcessFiles (PSZ szFileSpec, PSZ pszAppend,
+                   PSZ pszPre,     PSZ pszPost,
+                   PLNKS plnks)
+                   
+   {
+   PFINFO pfo, pfoTmp;
+   FILE   *fpIn, *fpOut;
+   UINT   i, uFiles = 0;
+   char   szInFile [256]; 
+   char   szOutFile[256]; 
+   PSZ    psz, psz1;
+   char   szPath[256];
+
+   DirSplitPath (szPath, szFileSpec, DIR_DRIVE | DIR_DIR);
+   pfo = DirFindAll (szFileSpec, FILE_NORMAL);
+   for (pfoTmp = pfo; pfoTmp; pfoTmp = pfoTmp->next)
+      {
+      /*--- build input and output file names ---*/
+
+      strcpy (szInFile, szPath);
+      strcat (szInFile, pfoTmp->szName);
+      for (i=0; szInFile[i]; i++)
+         szInFile[i] = tolower (szInFile[i]);
+      
+   
+
+      strcpy (szOutFile, szPath);
+      strcat (szOutFile, pfoTmp->szName);
+      psz = ((psz1 = strrchr (szOutFile, '\\')) ? psz1 : szOutFile);
+      if (psz = strrchr (szOutFile, '.'))
+         *psz = '\0';
+      if (pszAppend)
+         {
+         szOutFile[8-strlen(pszAppend)] = '\0';
+         strcat (szOutFile, pszAppend);
+         }
+      strcat (szOutFile, ".htm");
+
+      if (!(fpIn = fopen (szInFile, "rt")))
+         Error ("Cannot open input file %s", szInFile);
+      if (!(fpOut = fopen (szOutFile, "wt")))
+         Error ("Cannot open output file %s", szOutFile);
+
+      printf ("Processing File %s to %s ...", szInFile, szOutFile);
+      WriteBlock (fpOut, pszPre, szInFile, szOutFile);
+      WriteBody (fpOut, fpIn, plnks, szInFile, szOutFile);
+      WriteBlock (fpOut, pszPost, szInFile, szOutFile);
+      fclose (fpIn);
+      fclose (fpOut);
+      printf ("\n");
+      uFiles++;
+      }
+   DirFindAllCleanup (pfo);
+   return uFiles;
+   }
+
+
+
+int main (int argc, char *argv[])
+   {
+   CHAR szPreFile   [256];
+   CHAR szPostFile  [256];
+   CHAR szPath      [256];
+   PSZ  psz;
+   PSZ  pszPre; 
+   PSZ  pszPost; 
+   PSZ  pszSpec; 
+   UINT i, uFiles;
+
+   if (ArgBuildBlk ("*^Pre% *^Post% *^Var% *^Links% *^Dump *^CaseSensitive ?"))
+      Error ("%s", ArgGetErr ());
+
+   if (ArgFillBlk (argv))
+      Error ("%s", ArgGetErr ());
+
+   if (ArgIs ("?"))
+      Usage ();
+
+   bCASE = ArgIs ("CaseSensitive");
+
+   /*--- pre and post files ---*/
+   strcpy (szPath, argv[0]);
+   if (psz = strrchr (szPath, '\\'))
+      psz[1] = '\0';
+
+   if (ArgIs ("Pre"))
+      strcpy (szPreFile, ArgGet ("Pre", 0));
+   else
+      strcpy (szPreFile, "PRE.HTM");
+
+   if (ArgIs ("Post"))
+      strcpy (szPostFile, ArgGet ("Post", 0));
+   else
+      strcpy (szPostFile, "POST.HTM");
+
+   pszPre  = LoadBuffer (szPreFile);
+   pszPost = LoadBuffer (szPostFile);
+
+   /*--- links files ---*/
+   lnks.plnkT = lnks.plnkN = NULL;
+   for (i=0; i < ArgIs ("Links"); i++)
+      ReadAutolinkFile (&lnks, ArgGet ("Links", i), "C");
+   if (!i)
+      ReadAutolinkFile (&lnks, "LINKS.LNK", "C");
+
+   if (ArgIs ("Dump"))
+      {
+      DumpLinks (lnks.plnkT);
+      exit (0);
+      }
+
+   pszSpec = (ArgIs (NULL) ? ArgGet (NULL, 0) : "*.pli");
+      uFiles = ProcessFiles (pszSpec, NULL, pszPre, pszPost, &lnks);
+   printf ("%u Files processed", uFiles);
+   return 0;
+   }
+

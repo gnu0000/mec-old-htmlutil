@@ -1,0 +1,272 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\rtfdri~1.pli"></A>/*====================================================================*/
+/*                                                                    */
+/*  RTFDRIV_SETUP: Define stand-alone environment for RTFDRIV         */
+/*                                                                    */
+/*  This program is a modified combination of the BUILD_RTFPARM,      */
+/*  RTFPROF, and RTFSETUP programs.  It defines the environment for   */
+/*  RTF based on an RTFDRIV parameter file.  The templates referenced */
+/*  in the RTFDRIV parameter file do not have to be defined in the    */
+/*  UDYNAMIC or UTEMPLAT master files.                                */
+/*                                                                    */
+/*  Author: RTD  (09/03/93)                                           */
+/*                                                                    */
+/*-------------------- Program Modification History ------------------*/
+/*                                                                    */
+/*====================================================================*/
+
+rtfdriv_setup: proc options (main);
+
+  %include benvstp;
+  %init_type = 'INTEGRATED';
+  %include btcstup;
+
+  %include utemplat;
+  %include urtflibs;
+  %include rtffiles;
+
+  shell$module_name    = 'RTFDRIV_SETUP';
+  shell$module_segment = 'SETUP';
+
+  itrc = itset ('LOCK'        ,'FATAL');
+  itrc = itset ('TNF'         ,'FATAL');
+  itrc = itset ('NOTOPEN'     ,'FATAL');
+  itrc = itset ('ALREADY_OPEN','FATAL');
+
+
+  dcl parmbuf         char(80) varying,
+      fixed_parmbuf   char(80),
+      record          char(80) varying,
+      rtfparm         file,
+      rtfdriv_parm    file,
+      rtfprof         file,
+      template_file   file,
+      template_found  bit(1),
+      urtflib_found   bit (1),
+      user_id         char(8),
+      keyword         char(8)       init(' '       ),
+      parm            char(8)       init(' '       ),
+      process         char(8)       init(' '       ),
+      rtfuser         char(8)       init('RTFBASE' ),
+      templib         char(8)       init('USERTABL'),
+      os              char(3)       init(' '       ),
+      liblist         char(17)      init(' '       ),
+      libname         char(8)       init(' '       ),
+      rc              fixed bin(15) init(0         ),
+      i               fixed bin(15) init(0         ),
+      eof             bit(1)        init('0'b      );
+ 
+  on endfile(rtfparm)      eof = '1'b;
+  on endfile(rtfdriv_parm) eof = '1'b;
+
+  on undefinedfile (template_file) template_found = '0'b;
+
+
+  /*==========================================================================*/
+  /*                           Build the RTFPARM File                         */
+  /*==========================================================================*/
+
+  user_id = translate_logical ('SHELL$USER_ID');
+
+  if user_id = ' '
+     then call fatal_error ('PROGRAM','SHELL$USER_ID logical is undefined.');
+
+
+  itrc = itopen ('URTFLIBS',addr(urtflibs_record),'READ','0',' ',' ');
+
+  if itrc ^= 0
+     then call fatal_error ('PROGRAM',
+               'Error opening URTFLIBS file.  ITOPEN returned ' ||
+               'unsuccesful status ' || trim(character(itrc)));
+
+  itrc = itread ('URTFLIBS',user_id,'0',' ');
+  urtflib_found = (itrc = 0);
+
+  itrc = itclose ('URTFLIBS',' ');
+
+
+  open file (rtfparm) record sequential output;
+
+  process = 'RTFDRIV';
+  templib = 'TEMPTABL';
+  os      = 'VMS';
+
+  if urtflib_found
+     then rtfuser = urtflibs_record.urtflib;
+     else rtfuser = 'RTFBASE';
+
+  record  = 'PROCESS=' || process;
+  write file (rtfparm) from (record);
+
+  record = 'RTFUSER=' || rtfuser;
+  write file (rtfparm) from (record);
+
+  record  = 'TEMPLIB=' || templib;
+  write file (rtfparm) from (record);
+
+  record = 'OS=' || os;
+  write file (rtfparm) from (record);
+
+  close file (rtfparm);
+
+
+  /*==========================================================================*/
+  /* Build an RTFFILES record for each includable template in the libraries   */
+  /* in the user's library path.                                              */
+  /*==========================================================================*/
+
+  rc=itopen(trim((templib)) || '.RTFFILES',
+            addr(rtffiles_record),'WRITE','','','');
+
+  if rtfuser = 'RTFBASE'
+     then liblist = 'RTFBASE';
+     else liblist = rtfuser || ' RTFBASE';
+
+  rc=itopen('UTEMPLAT', addr(utemplat_record),'READ','','','');
+
+  do i=2 to 1 by -1;
+     libname=word(liblist,i,' ');
+     if libname^='' 
+        then do;
+          rc=itread('UTEMPLAT', libname, '1', 'GE');
+          do while(utemplat_record.tmpllib=libname &amp rc=0);
+             if utemplat_record.tmplincl='Y'
+                then do;
+                  rtffiles_record.rtffname=utemplat_record.tmplname;
+                  rtffiles_record.rtfflib =utemplat_record.tmpllib;
+                  rc=itwrite('RTFFILES','');
+                end;
+             rc=itread('UTEMPLAT','','','');
+          end;
+        end;
+  end;
+
+  rc=itclose('UTEMPLAT','');
+
+
+  /*==========================================================================*/
+  /* Build an RTFFILES record for each template in the RTFDRIV parm file.     */
+  /* Build the $AREAS section of the RTFPROF file with one areas record for   */
+  /* each template in the RTFDRIV parm file.                                  */
+  /*==========================================================================*/
+
+  open file (rtfprof) record sequential output;
+
+  call wp ('$AREAS');
+
+  open file (rtfdriv_parm) record sequential input;
+
+  eof = '0'b;
+  read file (rtfdriv_parm) into (parmbuf);
+
+  do while(^eof);
+
+     fixed_parmbuf = parmbuf;
+     keyword=word(fixed_parmbuf,1,'= ');
+     parm=trim(word(fixed_parmbuf,2,'= '));
+
+     if keyword = 'TEMPLATE'
+        then do;
+          call wp (' ' || parm || ' ' || parm);
+
+          rtffiles_record.rtffname = parm;
+          if liblist = 'RTFBASE'
+             then 
+               rtffiles_record.rtfflib = 'RTFBASE';
+             else do;
+               libname = word(liblist,1,'= ');
+               template_found = '1'b;
+               open file (template_file)
+                    record sequential input
+                    title (trim(libname) || ':' || trim(parm) || '.TEMPLATE');
+               if template_found
+                  then do;
+                    close file (template_file);
+                    rtffiles_record.rtfflib = libname;
+                  end;
+                  else
+                    rtffiles_record.rtfflib = 'RTFBASE';               
+             end;
+
+          rc=itwrite('RTFFILES','');
+        end;
+
+     read file (rtfdriv_parm) into (parmbuf);
+  end;
+
+  close file (rtfdriv_parm);
+
+
+  /*==========================================================================*/
+  /* For each record in RTFFILES:                                             */
+  /*   Assign a sequential logical name for the template.                     */
+  /*   Define the logical name.                                               */
+  /*   Create an INCLUDE record in the RTFPROF file for the template.         */
+  /*==========================================================================*/
+
+  call wp ('$INCLUDE');
+
+  rc=itread('RTFFILES', '', '0', 'GE');
+
+  do i=1 by 1 while(rc=0);
+
+     rtffiles_record.rtffid='RTFA' || trim(character(i));
+     rc=itwrite('RTFFILES','');
+
+     call wp (trim(rtffiles_record.rtffname));
+
+     call define_logical_name (trim(rtffiles_record.rtffid),
+                               trim(rtffiles_record.rtfflib) || ':' ||
+                               trim(rtffiles_record.rtffname) || '.TEMPLATE');
+
+     rc=itread('RTFFILES','','','');
+  end;
+
+  rc=itclose('RTFFILES','');
+
+  close file (rtfprof);
+
+
+  /*------------------------------------------------------------------*/
+  /*                             WP                                   */
+  /*                                                                  */
+  /*  Write a record to the RTFPROF file.                             */
+  /*------------------------------------------------------------------*/
+
+  wp: proc (record);
+
+    dcl record char(*) varying;
+
+    write file (rtfprof) from (record);
+
+  end wp;
+
+
+end rtfdriv_setup;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

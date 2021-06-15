@@ -1,0 +1,102 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\setppfb.pli"></A> /*-------------------------------------------------------------------*/
+ /*                                                                   */
+ /*   SETPPFB - SET PROJECT FIELDBOOK FLAG TO &quotN&quot                     */
+ /*                                                                   */
+ /*   THIS PROGRAM SETS THE PROJECT.FUELSTAT FIELD FOR ALL RECORDS    */
+ /*   TO &quotN&quot.  THE PROGRAM REQUIRES EXCLUSIVE ACCESS TO THE PROJECT   */
+ /*   FILE.                                                           */
+ /*                                                                   */
+ /*   WRITTEN BY: RTD  10/26/94                                       */
+ /*   MODIFIED BY: PCGW 95/06/12                                      */
+ /*                                                                   */
+ /*-------------------------------------------------------------------*/
+
+ SETPPFB: PROC OPTIONS (MAIN);
+
+  %INCLUDE BENVSTP;
+  %INIT_TYPE = 'INTEGRATED';
+  %INCLUDE BTCSTUP;
+
+  SHELL$MODULE_NAME    = 'SETPPFB';
+  SHELL$MODULE_SEGMENT = 'SETUP';
+
+  %INCLUDE PROJECT;
+
+  ITRC = ITSET ('LOCK','RETURN');
+
+  DCL EOF      BIT(1) INIT ('0'B),
+      RECORDS  FIXED BIN (31) INIT(0);
+
+  PUT SKIP LIST ('ASSIGNING &quotN&quot DEFAULT VALUE TO ' ||
+                 'ALL PES PROJECTS...');
+
+  PROJECT_RECORD_PTR = ADDR(PROJECT_RECORD);
+  ITRC = ITOPEN ('PROJECT',PROJECT_RECORD_PTR,'WRITE','','',
+                 'LOCK=NOSHARE');
+
+  IF ITRC = 12
+     THEN CALL FATAL_ERROR ('PROGRAM',
+          'UNABLE TO OBTAIN EXCLUSIVE ACCESS TO THE PROJECT FILE');
+
+  IF ITRC ^= 0
+     THEN CALL FATAL_ERROR ('PROGRAM',
+          'OPEN OF PROJECT FILE FAILED WITH RETURN CODE ' ||
+          TRIM(CHARACTER(ITRC)));
+
+  ITRC = ITREAD ('PROJECT','','','');
+  EOF = (ITRC = 8);
+
+  DO WHILE (^EOF);
+
+     RECORDS = RECORDS + 1;
+
+     PROJECT_RECORD.FUELSTAT = 'N';
+
+     ITRC = ITWRITE ('PROJECT','');
+
+     IF ITRC ^= 0
+        THEN CALL FATAL_ERROR ('PROGRAM',
+             'ITWRITE TO UPDATE PROJECT FAILED WITH RETURN CODE ' ||
+             TRIM(CHARACTER(ITRC)));
+
+     ITRC = ITREAD ('PROJECT','','','');
+     EOF = (ITRC = 8);
+  END;
+
+  ITRC = ITCLOSE ('PROJECT',' ');
+
+  PUT SKIP LIST (' ');
+
+  PUT SKIP LIST ('&quotN&quot FIELDBOOK DEFAULT VALUE ASSIGNED TO ' ||
+                 TRIM(CHARACTER(RECORDS)) ||
+                 ' PES PROJECTS.');
+
+ END SETPPFB;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

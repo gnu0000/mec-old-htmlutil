@@ -1,0 +1,886 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\dcelcst.pli"></A> /*==================================================================*/
+ /*                                                                  */
+ /*           DCELCST: DETERMINE LOW COST CATG &amp ITEM ALTERNATES     */
+ /*                                                                  */
+ /*           ORIGINAL AUTHOR : CJB   10/12/87                       */
+ /*           1.0 CONVERSION  : GNC                                  */
+ /*           2.0 (IBM)       :                                      */
+ /*           2.0 (VAX)       : KLS   03/17/89                       */
+ /*                                                                  */
+ /*--------------- PROGRAM MODIFICATION HISTORY ---------------------*/
+ /*                                                                  */
+ /*           02/29/90   : LKF                                       */
+ /*                        REMOVED A CONDITION IN THE MAIN WHILE     */
+ /*                        LOOP WHICH HAD ALWAYS SET DECATG_         */
+ /*                        FOUND TO FALSE.  THIS FIXED A PROBLEM     */
+ /*                        OF ZERO TOTALS PRINTING FOR CATEGORY,     */
+ /*                        PROJECT, AND ESTIMATE.                    */
+ /*                                                                  */
+ /*           06/20/90   : PCG                                       */
+ /*                        ADDED AN IF STATEMENT AT THE BEGINNING OF */
+ /*                        PROJECT LOOP TO DETERMINE IF THE PROJECT  */
+ /*                        WAS FROM PES OR LAS SOURCE.  IF THE       */
+ /*                        PROJECT IS FROM LAS THEN THE PROCESS IS   */
+ /*                        SKIPPED.  IF THE PROJECT IS FROM PES,     */
+ /*                        THEN THE PROCESS IS CONTINUED.  ONLY      */
+ /*                        CHECK FOR LOWCOST ITEMS IF THE PROJECT IS */
+ /*                        FROM PES (I.E. WANT A PRELIMINARY DETAIL  */
+ /*                        ESTIMATE).  IF THE PROJECT IS FROM LAS,   */
+ /*                        THE ITEMS SHOULD ALREADY BE LOWCOST.      */
+ /*                                                                  */
+ /*           02/07/91   : TPS                                       */
+ /*                        added checks for null pointers in the     */
+ /*                        proc EVALUATE_CATEGORY_ALTERNATES.        */
+ /*                                                                  */
+ /*==================================================================*/
+ DCELCST:  PROC OPTIONS (MAIN);
+     
+   %INCLUDE BENVSTP;
+     
+   %INIT_TYPE = 'INTEGRATED';
+     
+   %INCLUDE BTCSTUP;
+     
+   SHELL$MODULE_NAME    = 'LOADFILE';
+   SHELL$MODULE_SEGMENT = 'SETUP';
+     
+   ITRC = ITSET ('LOCK','FATAL');
+   ITRC = ITSET ('TNF' ,'FATAL');
+     
+   %INCLUDE DCEFILES;
+     
+   DCL (I,T)                            POINTER,
+        CURRENT_PCN                     CHAR (13),
+       (DECATG_FOUND,DEITEM_FOUND,
+        DEPROJ_FOUND,OVERFLOW)          BIT (1);
+     
+   /*--- ESTIMATE ITEM LIST NODE ---*/
+   DCL (ESTITEM_TOP,ESTITEM_END,EI) POINTER;
+   DCL 1 ESTITEM_NODE  BASED,
+         2 PCN         CHAR (13),
+         2 CN          CHAR (4),
+         2 CNALT       CHAR (3),
+         2 UNITNO      CHAR (3),
+         2 IELINENO    CHAR (4),
+         2 IALT        CHAR (3),
+         2 EXTAMT      FIXED DEC (15,5),
+         2 LOWCOST     BIT (1),
+         2 NEXT_PTR    POINTER;
+     
+   /*--- IALT ITEM ALTERNATE LIST NODE DECLARATION ---*/
+   DCL (IALT_TOP, IALT_END)  POINTER;
+   DCL 1 IALT_NODE         BASED,
+         2 IALT            CHAR (3),
+         2 COST            FIXED DEC (15,5),
+         2 LOWCOST         BIT (1),
+         2 NEXT_PTR        POINTER;
+     
+   /*--- CNALT CATEGORY ALTERNATE LIST NODE DECLARATION ---*/
+   DCL (CNALT_TOP, CNALT_END)  POINTER;
+   DCL 1 CNALT_NODE        BASED,
+         2 CNALT           CHAR (3),
+         2 CN              CHAR (4),
+         2 UNITNO          CHAR (3),
+         2 COST            FIXED DEC (15,5),
+         2 LOWCOST         BIT (1),
+         2 NEXT_PTR        POINTER;
+     
+   ESTITEM_TOP  = NULL();
+   ESTITEM_END  = NULL();
+     
+   ON FIXEDOVERFLOW OVERFLOW = '1'B;
+     
+   GPDEPROJ_RECORD_PTR = ADDR(GPDEPROJ_RECORD);
+   ITRC = ITOPEN ('GPDEPROJ', GPDEPROJ_RECORD_PTR, 'READ', '', '',
+                  'LIBRARY=TEMPTABL');
+     
+   GPDECATG_RECORD_PTR = ADDR(GPDECATG_RECORD);
+   ITRC = ITOPEN ('GPDECATG', GPDECATG_RECORD_PTR, 'WRITE', '', '',
+                  'LIBRARY=TEMPTABL');
+     
+   GPDEITEM_RECORD_PTR = ADDR(GPDEITEM_RECORD);
+   ITRC = ITOPEN ('GPDEITEM', GPDEITEM_RECORD_PTR, 'WRITE', '', '',
+                  'LIBRARY=TEMPTABL');
+     
+     
+   /*----------------------------------------------------------------*/
+   /* FOR EACH PROJECT, DETERMINE ITS LOWCOST ALTERNATE CATEGORIES   */
+   /* AND LOWCOST ALTERNATE ITEMS WHEN THE LOWCOST FLAG IS BLANK.    */
+   /* LOWCOST FLAG WILL BE SET TO Y OR N WITHIN THIS PROCESS.        */
+   /*                                                                */
+   /* FOR THE PRELIMINARY DETAIL ESTIMATE, THE LOWCOST FLAG IS       */
+   /* INITIALIZED TO BLANK FOR ALL CATEGORIES AND ITEMS BY THE       */
+   /* DCELDFL MODULE. THUS, ALL CATEGORIES AND ITEMS FOR THE         */
+   /* PRELIMINARY ESTIMATE ARE PROCESSED HERE.                       */
+   /*                                                                */
+   /* FOR THE FINAL DETAIL ESTIMATE, LOWCOST ITEMS AND CATEGORIES    */
+   /* FOR A PROJECT IN AN AWARDED PROPOSAL ARE GENERALLY DETERMINED  */
+   /* FROM BIDTABS RECORDS IN THE DCELDFL MODULE.  THE LOWCOST FLAG  */
+   /* WILL NOT BE BLANK AND THESE RECORDS WILL NOT BE PROCESSED HERE.*/
+   /* IN THE CASE OF PROJECTS IN THE SAME PRIME PROJECT BUT NOT IN   */
+   /* AN AWARDED PROPOSAL (NO BIDTABS, LETPROP, OR PROPOSAL) THE     */
+   /* LOWCOST CATEGORIES AND ITEMS WILL BE DETERMINED WITHIN THIS    */
+   /* DCELCST PROCESS.                                               */
+   /*----------------------------------------------------------------*/
+     
+   DEPROJ_FOUND = '1'B;
+     
+   ITRC = ITREAD ('GPDEPROJ', '', '', '');
+   IF ITRC = 8
+      THEN DEPROJ_FOUND = '0'B;
+     
+   DO WHILE (DEPROJ_FOUND);
+
+     /* ADDED BY PCG TO DETERMINE IF THE PROJECT WAS BUILT
+        FROM PES ESTITEM OR USING BIDTAB PRICE DATA.  SKIP
+        THIS PROCESS IF THE PROJECT IS FROM LAS (I.E. 
+        GPDEPROJ_RECORD.PJSOURCE = 'P').  THIS PROCESS WAS
+        MEANT TO RUN ONLY FOR PRELIMINARY DETAIL ESTIMATES */
+
+      IF GPDEPROJ_RECORD.PJSOURCE = 'P' THEN
+         DO;
+            CALL CONVERT_GPDEPROJ_TO_DEPROJ;
+     
+            CURRENT_PCN = DEPROJ_RECORD.PCN;
+     
+      /*-------------------------------------------------------*/
+      /*-- CHECK CATEGORY LOWCOST FLAG TO SEE IF LOWCOST HAS --*/
+      /*-- ALREADY BEEN DETERMINED (BY DCELDFL FOR AWARDED   --*/
+      /*-- PROJECTS). LOWCOST FLAG WILL BE BLANK IF NOT      --*/
+      /*-- ALREADY DETERMINED.  SKIP '0000' CATEGORY RECORD  --*/
+      /*-- BECAUSE ITS LOWCOST FLAG IS MEANINGLESS.          --*/
+      /*-------------------------------------------------------*/
+            DECATG_FOUND = '1'B;
+            ITRC = ITREAD ('GPDECATG', CURRENT_PCN, '', 'GE');
+
+      /* 2/29/90 THE FOLLOWING IF HAD THE ADDITIONAL CONDITION
+         DECATG_RECORD.PCN ^= CURRENT_PCN WHICH ALWAYS CAUSED
+         DECATG_FOUND TO BE FALSE.  ZERO VALUESS PRINTED FOR
+         CATEGORY, PROJECT, AND ESTIMATE TOTALS.  I REMOVED THE
+         CONDITION.  LKF */
+
+            IF ITRC = 8 
+               THEN DECATG_FOUND = '0'B;
+            IF DECATG_FOUND
+               THEN CALL CONVERT_GPDECATG_TO_DECATG;
+     
+            IF DECATG_RECORD.CN = '0000'
+               THEN DO;
+                 ITRC = ITREAD ('GPDECATG', '', '', '');
+                 IF ITRC = 8
+                    THEN DECATG_FOUND = '0'B;
+                 IF DECATG_FOUND
+                    THEN CALL CONVERT_GPDECATG_TO_DECATG;
+               END;  /* IF CN = 000 DO */
+     
+            IF DECATG_FOUND &amp DECATG_RECORD.PCN = CURRENT_PCN
+                &amp DECATG_RECORD.CLOWCOST = ' '
+              THEN DO;
+     
+                 CALL BUILD_ITEM_LIST;
+                 CALL BUILD_ALTERNATE_LISTS;
+     
+                 CALL EVALUATE_ITEM_ALTERNATES;
+                 CALL EVALUATE_CATEGORY_ALTERNATES;
+     
+                 CALL UPDATE_DEITEM;
+                 CALL UPDATE_DECATG;
+     
+                 CALL FREE_ITEM_AND_ALT_LISTS;
+               END;  /* IF DECATG_FOUND DO */
+
+         END;   /* IF PJSOURCE = L DO */     
+      ITRC = ITREAD ('GPDEPROJ', '', '', '');
+      IF ITRC = 8
+         THEN DEPROJ_FOUND = '0'B;
+   END;  /* DO WHILE DEPROJ_FOUND */
+     
+   REVERT FIXEDOVERFLOW;
+     
+   ITRC = ITCLOSE ('GPDECATG', 'LIBRARY=TEMPTABL');
+   ITRC = ITCLOSE ('GPDEITEM', 'LIBRARY=TEMPTABL');
+   ITRC = ITCLOSE ('GPDEPROJ', 'LIBRARY=TEMPTABL');
+     
+ /*------------------------------------------------------------------*/
+ /*                          BUILD ITEM LIST                         */
+ /*                                                                  */
+ /*                BUILD LIST OF ALL ITEMS FOR PROJECT.              */
+ /*------------------------------------------------------------------*/
+ BUILD_ITEM_LIST:    PROC;
+     
+   DCL SAVE_SEGMENT          CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_ITEM_LIST';
+     
+   DECATG_FOUND = '1'B;
+   DECATG_KEY   = CURRENT_PCN;
+     
+   ITRC = ITREAD ('GPDECATG', DECATG_KEY, '', 'GE');
+   IF ITRC = 8
+      THEN DECATG_FOUND = '0'B;
+     
+   IF DECATG_FOUND
+      THEN CALL CONVERT_GPDECATG_TO_DECATG;
+     
+   DO WHILE (DECATG_FOUND &amp DECATG_RECORD.PCN = CURRENT_PCN);
+     
+      DEITEM_FOUND = '1'B;
+      DEITEM_KEY   = DECATG_RECORD.PCN || DECATG_RECORD.CN;
+     
+      ITRC = ITREAD ('GPDEITEM', DEITEM_KEY, '', 'GE');
+      IF ITRC = 8
+         THEN DEITEM_FOUND = '0'B;
+      IF DEITEM_FOUND
+         THEN CALL CONVERT_GPDEITEM_TO_DEITEM;
+     
+      DO WHILE (DEITEM_FOUND &amp DEITEM_RECORD.PCN = CURRENT_PCN &amp
+                               DEITEM_RECORD.CN  = DECATG_RECORD.CN);
+     
+         ALLOCATE ESTITEM_NODE SET (EI);
+     
+         EI-&gtESTITEM_NODE.PCN      = DECATG_RECORD.PCN;
+         EI-&gtESTITEM_NODE.CN       = DECATG_RECORD.CN;
+         EI-&gtESTITEM_NODE.CNALT    = DECATG_RECORD.CNALT;
+         EI-&gtESTITEM_NODE.UNITNO   = DECATG_RECORD.UNITNO;
+         EI-&gtESTITEM_NODE.IELINENO = DEITEM_RECORD.IELINENO;
+         EI-&gtESTITEM_NODE.IALT     = DEITEM_RECORD.IALT;
+         EI-&gtESTITEM_NODE.EXTAMT   = DEITEM_RECORD.IEXTAMT;
+         EI-&gtESTITEM_NODE.LOWCOST  = '0'B;
+         EI-&gtESTITEM_NODE.NEXT_PTR = NULL();
+     
+         IF ESTITEM_TOP = NULL()
+            THEN ESTITEM_TOP = EI;
+            ELSE ESTITEM_END -&gt ESTITEM_NODE.NEXT_PTR = EI;
+         ESTITEM_END = EI;
+     
+         ITRC = ITREAD ('GPDEITEM', '', '', '');
+         IF ITRC = 8
+            THEN DEITEM_FOUND = '0'B;
+         IF DEITEM_FOUND
+            THEN CALL CONVERT_GPDEITEM_TO_DEITEM;
+      END;
+     
+      ITRC = ITREAD ('GPDECATG', '', '', '');
+      IF ITRC = 8
+         THEN DECATG_FOUND = '0'B;
+      IF DECATG_FOUND
+         THEN CALL CONVERT_GPDECATG_TO_DECATG;
+   END;
+     
+ END BUILD_ITEM_LIST;
+     
+ /*------------------------------------------------------------------*/
+ /*                      BUILD_ALTERNATE_LISTS                       */
+ /*                                                                  */
+ /*       BUILD CATEGORY AND ITEM ALTERNATE LISTS FOR PROJECT        */
+ /*------------------------------------------------------------------*/
+     
+ BUILD_ALTERNATE_LISTS: PROC;
+     
+   DCL SAVE_SEGMENT         CHAR (31),
+       FOUND_NODE           BIT  (1),
+       (PREV_PTR, LOC_PTR)  POINTER;
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'BUILD_ALTERNATE_LISTS';
+     
+   /*----------------------------------------------------------------*/
+   /*------NOTE: THE CATEGORY NUMBER ON THE CATEGORY LIST THAT IS----*/
+   /*------ASSOCIATED WITH THE BLANK CATEGORY ALTERNATE (I.E.    ----*/
+   /*------CATEGORIES W/BLANK CNALT) WILL BE IRRELEVANT. THIS    ----*/
+   /*------CATEGORY NUMBER IS THE CATEGORY NUMBER OF THE FIRST   ----*/
+   /*------CATEGORY WITH A BLANK ALTERNATE CODE. IT WAS LEFT     ----*/
+   /*------THIS WAY IN ORDER TO NOT INCREASE THE COMPLEXITY OF THE---*/
+   /*------CODE. THIS IS TAKEN INTO ACCOUNT WITHIN THE PROCEDURE ----*/
+   /*------THAT UPDATES THE DECATG FILE.                         ----*/
+   /*                                                                */
+   /*--- IALT LIST WILL CONTAIN ONE NODE FOR EACH IALT SPECIFIED  ---*/
+   /*--- FOR THE PROJECT.  THERE WILL BE AT LEAST ONE NODE IN IALT---*/
+   /*--- LIST WITH IALT = BLANK IF ONE OR MORE ITEMS HAVE NO      ---*/
+   /*--- ALTERNATE OR NO ITEMS HAVE ALTERNATES.                   ---*/
+   /*                                                                */
+   /*--- CNALT LIST WILL CONTAIN AT LEAST ONE NODE FOR EACH CN.   ---*/
+   /*--- IF A CATEGORY HAS NO ALTERNATES, THERE WILL BE A NODE    ---*/
+   /*--- WITH A BLANK CNALT.  OTHERWISE, THERE WILL BE A NODE FOR ---*/
+   /*--- EACH CNALT IN THE CATEGORY.                              ---*/
+   /*----------------------------------------------------------------*/
+                 
+   CNALT_TOP    = NULL();
+   CNALT_END    = NULL();
+   IALT_TOP     = NULL();
+   IALT_END     = NULL();
+     
+   EI = ESTITEM_TOP;
+   DO WHILE (EI ^= NULL());
+     
+      T = IALT_TOP;
+      FOUND_NODE = '0'B;
+      DO WHILE (T ^= NULL() &amp ^FOUND_NODE);
+         IF T-&gtIALT_NODE.IALT = EI-&gtESTITEM_NODE.IALT
+            THEN FOUND_NODE = '1'B;
+            ELSE T = T-&gtIALT_NODE.NEXT_PTR;
+      END;
+     
+      IF FOUND_NODE
+         THEN DO;
+           T-&gtIALT_NODE.COST = T-&gtIALT_NODE.COST +
+                               EI-&gtESTITEM_NODE.EXTAMT;
+           GOTO CATEGORY_ALTERNATE_STUFF;
+         END;
+     
+      ALLOCATE IALT_NODE SET (T);
+      T-&gtIALT_NODE.IALT     = EI-&gtESTITEM_NODE.IALT;
+      T-&gtIALT_NODE.COST     = EI-&gtESTITEM_NODE.EXTAMT;
+      T-&gtIALT_NODE.LOWCOST  = '0'B;
+      T-&gtIALT_NODE.NEXT_PTR = NULL();
+     
+      IF IALT_TOP = NULL()
+         THEN DO;
+           /*---- FIRST ENTRY IN LIST ----*/
+           IALT_TOP = T;
+           IALT_END = T;
+           T-&gtIALT_NODE.NEXT_PTR = NULL();
+           GOTO CATEGORY_ALTERNATE_STUFF;
+         END;
+     
+      /*---- FIND POSITION TO INSERT NODE IN LIST ----*/
+      PREV_PTR = IALT_TOP;
+      LOC_PTR  = IALT_TOP;
+      DO WHILE (T-&gtIALT_NODE.IALT &gt LOC_PTR-&gtIALT_NODE.IALT &amp
+                LOC_PTR-&gtIALT_NODE.NEXT_PTR ^= NULL());
+         PREV_PTR = LOC_PTR;
+         LOC_PTR = LOC_PTR -&gt IALT_NODE.NEXT_PTR;
+      END;
+     
+      /*---- INSERT THE NODE INTO THE LIST ---*/
+      SELECT;
+     
+        /*--- ADD NODE TO BEGINNING OF LIST ---*/
+        WHEN (LOC_PTR = IALT_TOP &amp
+              T-&gtIALT_NODE.IALT &lt LOC_PTR-&gtIALT_NODE.IALT)
+          DO;
+            T-&gtIALT_NODE.NEXT_PTR = IALT_TOP;
+            IALT_TOP = T;
+          END;
+     
+        /*--- ADD NODE TO END OF LIST ---*/
+        WHEN (LOC_PTR = IALT_END &amp
+              T-&gtIALT_NODE.IALT &gt LOC_PTR-&gtIALT_NODE.IALT)
+          DO;
+            LOC_PTR-&gtIALT_NODE.NEXT_PTR = T;
+            IALT_END = T;
+          END;
+     
+        /*--- INSERT NODE INTO MIDDLE OF LIST ---*/
+        OTHERWISE
+          DO;
+            PREV_PTR-&gtIALT_NODE.NEXT_PTR = T;
+            T-&gtIALT_NODE.NEXT_PTR = LOC_PTR;
+          END;
+      END;
+     
+      CATEGORY_ALTERNATE_STUFF:
+     
+      T = CNALT_TOP;
+      FOUND_NODE = '0'B;
+      DO WHILE (T ^= NULL() &amp ^FOUND_NODE);
+         IF T-&gtCNALT_NODE.CNALT = EI-&gtESTITEM_NODE.CNALT
+            THEN FOUND_NODE = '1'B;
+            ELSE T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+      IF FOUND_NODE
+         THEN DO;
+           T-&gtCNALT_NODE.COST = T-&gtCNALT_NODE.COST +
+                                EI-&gtESTITEM_NODE.EXTAMT;
+           GOTO NEXT_ITEM;
+         END;
+     
+      ALLOCATE CNALT_NODE SET (T);
+      T-&gtCNALT_NODE.CNALT    = EI-&gtESTITEM_NODE.CNALT;
+      T-&gtCNALT_NODE.CN       = EI-&gtESTITEM_NODE.CN;
+      T-&gtCNALT_NODE.UNITNO   = EI-&gtESTITEM_NODE.UNITNO;
+      T-&gtCNALT_NODE.COST     = EI-&gtESTITEM_NODE.EXTAMT;
+      T-&gtCNALT_NODE.LOWCOST  = '0'B;
+      T-&gtCNALT_NODE.NEXT_PTR = NULL();
+     
+      IF CNALT_TOP = NULL()
+         THEN DO;
+           /*---- FIRST ENTRY IN LIST ----*/
+           CNALT_TOP = T;
+           CNALT_END = T;
+           T-&gtCNALT_NODE.NEXT_PTR = NULL();
+           GOTO NEXT_ITEM;
+         END;
+     
+      /*---- FIND POSITION TO INSERT NODE IN LIST ----*/
+      PREV_PTR = CNALT_TOP;
+      LOC_PTR  = CNALT_TOP;
+      DO WHILE (T-&gtCNALT_NODE.CNALT &gt LOC_PTR-&gtCNALT_NODE.CNALT &amp
+                LOC_PTR-&gtCNALT_NODE.NEXT_PTR ^= NULL());
+         PREV_PTR = LOC_PTR;
+         LOC_PTR = LOC_PTR -&gt CNALT_NODE.NEXT_PTR;
+      END;
+     
+      /*---- INSERT THE NODE INTO THE LIST ---*/
+      SELECT;
+     
+        /*--- ADD NODE TO BEGINNING OF LIST ---*/
+        WHEN (LOC_PTR = CNALT_TOP &amp T-&gtCNALT_NODE.CNALT &lt
+                                    LOC_PTR-&gtCNALT_NODE.CNALT)
+          DO;
+            T-&gtCNALT_NODE.NEXT_PTR = CNALT_TOP;
+            CNALT_TOP = T;
+          END;
+     
+        /*--- ADD NODE TO END OF LIST ---*/
+        WHEN (LOC_PTR = CNALT_END &amp T-&gtCNALT_NODE.CNALT &gt
+                                    LOC_PTR-&gtCNALT_NODE.CNALT)
+          DO;
+            LOC_PTR-&gtCNALT_NODE.NEXT_PTR = T;
+            CNALT_END = T;
+          END;
+     
+        /*--- INSERT NODE INTO MIDDLE OF LIST ---*/
+        OTHERWISE
+          DO;
+            PREV_PTR-&gtCNALT_NODE.NEXT_PTR = T;
+            T-&gtCNALT_NODE.NEXT_PTR = LOC_PTR;
+          END;
+      END;
+     
+      NEXT_ITEM:
+      EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END BUILD_ALTERNATE_LISTS;
+     
+ /*------------------------------------------------------------------*/
+ /*                      EVALUATE_ITEM_ALTERNATES                    */
+ /*                                                                  */
+ /* EVALUATE THE ITEM ALTERNATES TO FIND THE LEAST COST ALTERNATE OF */
+ /* EACH OF THE ITEM ALTERNATE SETS.  FLAG THE ESTIMATE ITEMS AS TO  */
+ /* WHETHER THEY ARE MEMBERS OF LOW COST ALTERNATE SETS OR NOT.  THE */
+ /* ESTIMATE ITEMS THAT HAVE BEEN FLAGGED AS LOWCOST WILL THEN BE    */
+ /* USED IN CATEGORY ALTERNATE EVALUATION.                           */
+ /*------------------------------------------------------------------*/
+     
+ EVALUATE_ITEM_ALTERNATES: PROC;
+     
+   DCL SAVE_SEGMENT                    CHAR (31),
+       (LEAST_COST_PTR,T)              POINTER,
+       LEAST_COST                      FIXED DEC (11,2),
+       CURRENT_ALT_SET                 CHAR (2);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'EVALUATE_ITEM_ALTERNATES';
+     
+   /*----------------------------------------------------------------*/
+   /*------ FIND LEAST COST ALTERNATE FOR EACH ALTERNATE SET. -------*/
+   /*------ FIRST 2 CHARS OF IALT CODE = IALT SET, 3RD CHAR   -------*/
+   /*------ IS CHOICE NO. WITHIN THE SET.                     -------*/
+   /*----------------------------------------------------------------*/
+     
+   T = IALT_TOP;
+   LEAST_COST_PTR  = T;
+   LEAST_COST      = T-&gtIALT_NODE.COST;
+   CURRENT_ALT_SET = SUBSTR (T-&gtIALT_NODE.IALT,1,2);
+   DO WHILE (T ^= NULL());
+     
+      IF SUBSTR (T-&gtIALT_NODE.IALT,1,2) ^= CURRENT_ALT_SET
+         THEN DO;
+           LEAST_COST_PTR-&gtIALT_NODE.LOWCOST = '1'B;
+           CURRENT_ALT_SET = SUBSTR(T-&gtIALT_NODE.IALT,1,2);
+           LEAST_COST      = T-&gtIALT_NODE.COST;
+           LEAST_COST_PTR  = T;
+         END;
+     
+      IF T-&gtIALT_NODE.COST &lt LEAST_COST
+         THEN DO;
+           LEAST_COST_PTR = T;
+           LEAST_COST     = T-&gtIALT_NODE.COST;
+         END;
+     
+      T = T-&gtIALT_NODE.NEXT_PTR;
+   END;
+   LEAST_COST_PTR-&gtIALT_NODE.LOWCOST = '1'B;
+     
+   /*---- FLAG THE LOWCOST ITEMS USING THE ITEM ALTERNATE LIST -----*/
+   EI = ESTITEM_TOP;
+   DO WHILE (EI ^= NULL());
+      T = IALT_TOP;
+      DO WHILE (T-&gtIALT_NODE.IALT ^= EI-&gtESTITEM_NODE.IALT &amp
+                T-&gtIALT_NODE.NEXT_PTR ^= NULL());
+         T = T-&gtIALT_NODE.NEXT_PTR;
+      END;
+      IF T-&gtIALT_NODE.IALT = EI-&gtESTITEM_NODE.IALT
+         THEN EI-&gtESTITEM_NODE.LOWCOST = T-&gtIALT_NODE.LOWCOST;
+      EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END EVALUATE_ITEM_ALTERNATES;
+     
+ /*------------------------------------------------------------------*/
+ /*                     EVALUATE_CATEGORY_ALTERNATES                 */
+ /*                                                                  */
+ /* EVALUATE THE CATEGORY ALTERNATES TO FIND THE LEAST COST ALTERNATE*/
+ /* OF THE OF EACH CATEGORY ALTERNATE SETS.  USE ONLY THE ESTIMATE   */
+ /* BEEN ITEMS WHICH HAVE FLAGGED AS LOWCOST BY                      */
+ /* EVALUATE_ITEM_ALTERNATES.  FLAG THE ESTIMATE                     */
+ /* ITEMS AS TO WHETHER THEY ARE MEMBERS OF LOW COST CATEGORY        */
+ /* ALTERNATE SETS OR NOT.                                           */
+ /*------------------------------------------------------------------*/
+     
+ EVALUATE_CATEGORY_ALTERNATES: PROC;
+     
+   DCL SAVE_SEGMENT                    CHAR (31),
+       (LEAST_COST_PTR,TEMP_CNALT_TOP,
+        TEMP_CNALT_END,N,C)            POINTER,
+       LEAST_COST                      FIXED DEC (11,2),
+       HAS_LOW_COST_ITEMS              BIT (1),
+       CURRENT_ALT_SET                 CHAR (2);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'EVALUATE_CATEGORY_ALTERNATES';
+     
+   /*----------------------------------------------------------------*/
+   /*---- BUILD TEMPORARY CATEGORY ALTERNATE LIST CONTAINING ONLY ---*/
+   /*---- ALTERNATES WHICH CONTAIN LOWCOST ITEMS.                 ---*/
+   /*----------------------------------------------------------------*/
+   TEMP_CNALT_TOP = NULL();
+   TEMP_CNALT_END = NULL();
+   T = CNALT_TOP;
+   DO WHILE (T ^= NULL());
+     
+      HAS_LOW_COST_ITEMS = '0'B;
+      EI = ESTITEM_TOP;
+      DO WHILE (EI ^= NULL() &amp ^HAS_LOW_COST_ITEMS);
+         IF EI-&gtESTITEM_NODE.CNALT = T-&gtCNALT_NODE.CNALT
+            THEN HAS_LOW_COST_ITEMS = EI-&gtESTITEM_NODE.LOWCOST;
+         EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+      END;
+     
+      IF HAS_LOW_COST_ITEMS
+         THEN DO;
+           ALLOCATE CNALT_NODE SET (N);
+           N-&gtCNALT_NODE.CNALT    = T-&gtCNALT_NODE.CNALT;
+           N-&gtCNALT_NODE.CN       = T-&gtCNALT_NODE.CN;
+           N-&gtCNALT_NODE.UNITNO   = T-&gtCNALT_NODE.UNITNO;
+           N-&gtCNALT_NODE.COST     = 0;
+           N-&gtCNALT_NODE.LOWCOST  = '0'B;
+           N-&gtCNALT_NODE.NEXT_PTR = NULL();
+           IF TEMP_CNALT_TOP = NULL()
+              THEN TEMP_CNALT_TOP = N;
+              ELSE TEMP_CNALT_END-&gtCNALT_NODE.NEXT_PTR = N;
+           TEMP_CNALT_END = N;
+         END;
+      T = T-&gtCNALT_NODE.NEXT_PTR;
+   END;
+     
+   /*------------------------------------------------------*/
+   /*--- ACCUMULATE THE TOTAL COST FOR EACH CATEGORY    ---*/
+   /*--- ALTERNATE ON TEMPORARY CATEGORY ALTERNATE LIST ---*/
+   /*------------------------------------------------------*/
+   EI = ESTITEM_TOP;
+   DO WHILE (EI ^= NULL());
+     
+      IF ^EI-&gtESTITEM_NODE.LOWCOST
+         THEN GOTO NEXT_ITEM;
+     
+      T = TEMP_CNALT_TOP;
+      DO WHILE (T-&gtCNALT_NODE.CNALT ^= EI-&gtESTITEM_NODE.CNALT &amp
+                T-&gtCNALT_NODE.NEXT_PTR ^= NULL());
+         T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+      OVERFLOW = '0'B;
+      T-&gtCNALT_NODE.COST = T-&gtCNALT_NODE.COST +
+                           EI-&gtESTITEM_NODE.EXTAMT;
+      IF OVERFLOW
+         THEN CALL FATAL_ERROR ('PROGRAM',
+                                'TOTAL COST OVERFLOW FOR ITEM ' ||
+                                'ALTERNATE SET=' ||
+                                EI-&gtESTITEM_NODE.CNALT ||
+                                ' IN PROJECT=' || CURRENT_PCN);
+      NEXT_ITEM:
+      EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   /*----- FIND LEAST COST ALTERNATE FOR EACH ALTERNATE SET ---------*/
+   T = TEMP_CNALT_TOP;
+   LEAST_COST_PTR  = T;
+   LEAST_COST      = T-&gtCNALT_NODE.COST;
+   CURRENT_ALT_SET = SUBSTR (T-&gtCNALT_NODE.CNALT,1,2);
+   DO WHILE (T ^= NULL());
+     
+      IF SUBSTR (T-&gtCNALT_NODE.CNALT,1,2) ^= CURRENT_ALT_SET
+         THEN DO;
+           LEAST_COST_PTR-&gtCNALT_NODE.LOWCOST = '1'B;
+           CURRENT_ALT_SET = SUBSTR(T-&gtCNALT_NODE.CNALT,1,2);
+           LEAST_COST      = T-&gtCNALT_NODE.COST;
+           LEAST_COST_PTR  = T;
+         END;
+     
+      IF T-&gtCNALT_NODE.COST &lt LEAST_COST
+         THEN DO;
+           LEAST_COST_PTR = T;
+           LEAST_COST     = T-&gtCNALT_NODE.COST;
+         END;
+     
+      T = T-&gtCNALT_NODE.NEXT_PTR;
+   END;
+   LEAST_COST_PTR-&gtCNALT_NODE.LOWCOST = '1'B;
+     
+ /******************************************************************/
+ /*FLAG THE LOWCOST ITEMS USING THE TEMPORARY CATEGORY ALTERNATE LIST*/
+ /*EI = ESTITEM_TOP;                                               */
+ /*   DO WHILE (EI ^= NULL());                                     */
+ /*      IF ^EI-&gtESTITEM_NODE.LOWCOST                              */
+ /*         THEN GOTO NEXT_ESTITEM;                                */
+ /*      T = TEMP_CNALT_TOP;                                       */
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS             */ 
+
+ /*      DO WHILE (T-&gtCNALT_NODE.NEXT_PTR ^= NULL() &amp              */
+ /*                T-&gtCNALT_NODE.CNALT ^= EI-&gtESTITEM_NODE.CNALT); */
+
+ /*         T = T-&gtCNALT_NODE.NEXT_PTR;                            */
+ /*      END;                                                      */
+ /******************************************************************/
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS */
+
+ /******************************************************************/
+ /*      IF T-&gtCNALT_NODE.NEXT_PTR ^= NULL()                       */
+ /*         THEN EI-&gtESTITEM_NODE.LOWCOST = T-&gtCNALT_NODE.LOWCOST; */
+ /*      NEXT_ESTITEM:                                             */
+ /*      EI = EI-&gtESTITEM_NODE.NEXT_PTR;                           */
+ /*   END;                                                         */
+ /******************************************************************/
+
+     
+   /*-- TRANSFER THE INFORMATION FROM THE TEMP LIST TO THE ORG LIST -*/
+   T = TEMP_CNALT_TOP;
+   DO WHILE (T ^= NULL());
+     
+      C = CNALT_TOP;
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS */
+
+      DO WHILE (C-&gtCNALT_NODE.NEXT_PTR ^= NULL() &amp
+                C-&gtCNALT_NODE.CNALT ^= T-&gtCNALT_NODE.CNALT);
+         C = C-&gtCNALT_NODE.NEXT_PTR;
+      END;
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS */
+
+      IF C-&gtCNALT_NODE.CNALT = T-&gtCNALT_NODE.CNALT
+         THEN C-&gtCNALT_NODE.LOWCOST = T-&gtCNALT_NODE.LOWCOST;
+     
+      T = T-&gtCNALT_NODE.NEXT_PTR;
+   END;
+     
+   /*------------ FREE UP THE TEMPORARY CATEGORY ALTERNATE LIST -----*/
+   DO WHILE (TEMP_CNALT_TOP ^= NULL());
+      T = TEMP_CNALT_TOP-&gtCNALT_NODE.NEXT_PTR;
+      FREE TEMP_CNALT_TOP-&gtCNALT_NODE;
+      TEMP_CNALT_TOP = T;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END EVALUATE_CATEGORY_ALTERNATES;
+     
+ /*------------------------------------------------------------------*/
+ /*                          UPDATE_DEITEM                           */
+ /*                                                                  */
+ /*         UPDATES THE TEMPORARY ITEM FILE FROM THE ITEM LIST       */
+ /*------------------------------------------------------------------*/
+ UPDATE_DEITEM: PROC;
+     
+   DCL SAVE_SEGMENT  CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'UPDATE_DEITEM';
+     
+   EI = ESTITEM_TOP;
+   DO WHILE (EI ^= NULL());
+     
+      DEITEM_FOUND = '1'B;
+      DEITEM_KEY   = EI-&gtESTITEM_NODE.PCN ||
+                     EI-&gtESTITEM_NODE.CN  ||
+                     EI-&gtESTITEM_NODE.IELINENO;
+     
+      ITRC = ITREAD ('GPDEITEM', DEITEM_KEY, '', '');
+      IF ITRC = 8
+         THEN DEITEM_FOUND = '0'B;
+     
+      IF ^DEITEM_FOUND
+         THEN CALL FATAL_ERROR ('PROGRAM',
+                                'NO GPDEITEM RECORD FOR PCN='||
+                                EI-&gtESTITEM_NODE.PCN || ' CN=' ||
+                                EI-&gtESTITEM_NODE.CN || ' ILINENO=' ||
+                                EI-&gtESTITEM_NODE.IELINENO);
+     
+      CALL CONVERT_GPDEITEM_TO_DEITEM;
+     
+      IF EI-&gtESTITEM_NODE.LOWCOST
+         THEN DEITEM_RECORD.ILOWCOST = 'Y';
+         ELSE DEITEM_RECORD.ILOWCOST = 'N';
+     
+      CALL CONVERT_DEITEM_TO_GPDEITEM;
+     
+      ITRC = ITWRITE ('GPDEITEM', '');
+     
+      EI = EI-&gtESTITEM_NODE.NEXT_PTR;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END UPDATE_DEITEM;
+     
+ /*------------------------------------------------------------------*/
+ /*                           UPDATE_DECATG                          */
+ /*                                                                  */
+ /*          UPDATES THE TEMPORARY CATG FILE FROM THE CATG LIST      */
+ /*------------------------------------------------------------------*/
+ UPDATE_DECATG: PROC;
+     
+   DCL SAVE_SEGMENT  CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'UPDATE_DECATG';
+     
+   DECATG_FOUND = '1'B;
+   DECATG_KEY   = CURRENT_PCN;
+     
+   ITRC = ITREAD ('GPDECATG', DECATG_KEY, '', 'GE');
+   IF ITRC = 8
+      THEN DECATG_FOUND = '0'B;
+     
+   IF DECATG_FOUND
+      THEN CALL CONVERT_GPDECATG_TO_DECATG;
+     
+   DO WHILE (DECATG_FOUND &amp DECATG_RECORD.PCN = CURRENT_PCN);
+     
+  /*- IF THE CATEGORY IS NOT AN ALTERNATE, FLAG CATEGORY AS LOWCOST -*/
+      IF DECATG_RECORD.CNALT = ' '
+         THEN DO;
+           DECATG_RECORD.CLOWCOST = 'Y';
+           GOTO REWRITE_IT;
+         END;
+     
+  /*- CATEGORY IS AN ALTERNATE. DETERMINE VIA THE CATEGORY LIST IF--*/
+  /*- THE CATEGORY IS A LOW COST ALTERNATE CATEGORY.              --*/
+     
+  /*- LOCATE THE CATEGORY ALTERNATE ON THE CATEGORY ALTERNATE LIST -*/
+      T = CNALT_TOP;
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS */
+
+      DO WHILE (T-&gtCNALT_NODE.NEXT_PTR ^= NULL() &amp
+                T-&gtCNALT_NODE.CNALT ^= DECATG_RECORD.CNALT);
+         T = T-&gtCNALT_NODE.NEXT_PTR;
+      END;
+     
+
+      /* 02/07/91 ADDED BY TPS CHECK FOR NULL POINTERS */
+
+      IF T-&gtCNALT_NODE.CNALT = DECATG_RECORD.CNALT &amp
+         T-&gtCNALT_NODE.LOWCOST 
+         THEN DECATG_RECORD.CLOWCOST = 'Y';
+         ELSE DECATG_RECORD.CLOWCOST = 'N';
+     
+      REWRITE_IT:
+     
+      DECATG_KEY = CURRENT_PCN || DECATG_RECORD.UNITNO ||
+                   DECATG_RECORD.CN;
+     
+      CALL CONVERT_DECATG_TO_GPDECATG;
+      ITRC = ITWRITE ('GPDECATG', '');
+      IF (ITRC ^= 0 &amp ITRC ^= 8)
+         THEN CALL FATAL_ERROR ('PROGRAM','UNABLE TO UPDATE GPDECATG');
+     
+      ITRC = ITREAD  ('GPDECATG', '', '', '');
+      IF ITRC = 8
+         THEN DECATG_FOUND = '0'B;
+      IF DECATG_FOUND
+         THEN CALL CONVERT_GPDECATG_TO_DECATG;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END UPDATE_DECATG;
+     
+ /*------------------------------------------------------------------*/
+ /*                      FREE_ESTITEM_AND_ALT_LISTS                  */
+ /*                                                                  */
+ /*         FREE THE ESTIMATE ITEM, ITEM ALTERNATE, AND CATEGORY     */
+ /*             ALTERNATE LISTS                                      */
+ /*------------------------------------------------------------------*/
+     
+ FREE_ITEM_AND_ALT_LISTS: PROC;
+     
+   DCL SAVE_SEGMENT  CHAR (31);
+     
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+   SHELL$MODULE_SEGMENT = 'FREE_ITEM_AND_ALT_LISTS';
+     
+   DO WHILE (ESTITEM_TOP ^= NULL());
+      EI = ESTITEM_TOP -&gt ESTITEM_NODE.NEXT_PTR;
+      FREE ESTITEM_TOP -&gt ESTITEM_NODE;
+      ESTITEM_TOP = EI;
+   END;
+     
+   DO WHILE (CNALT_TOP ^= NULL());
+      T = CNALT_TOP-&gtCNALT_NODE.NEXT_PTR;
+      FREE CNALT_TOP-&gtCNALT_NODE;
+      CNALT_TOP = T;
+   END;
+     
+   DO WHILE (IALT_TOP ^= NULL());
+      T = IALT_TOP-&gtIALT_NODE.NEXT_PTR;
+      FREE IALT_TOP-&gtIALT_NODE;
+      IALT_TOP = T;
+   END;
+     
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+     
+ END FREE_ITEM_AND_ALT_LISTS;
+     
+      
+ END DCELCST;
+     
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

@@ -1,0 +1,208 @@
+<HTML>
+<HEAD>
+<TITLE>test\xcpesub.pli</TITLE>
+</HEAD>
+<BODY>
+<H1>test\xcpesub.pli</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\xcpesub.pli"></A> /********************************************************************/
+ /*                                                                  */
+ /*      XCPESUB: BUILD PROPPRIC PROPOSAL SUBSET TABLE               */
+ /*                                                                  */
+ /*      The first program of PES Load Contract Price Estimates      */
+ /*                                                                  */
+ /********************************************************************/
+ XCPESUB: PROC OPTIONS (MAIN);
+
+   %INCLUDE BENVSTP;
+   %INIT_TYPE = 'INTEGRATED';
+   %INCLUDE BTCSTUP;
+   %INCLUDE PXCPEBO;
+   %INCLUDE PROPOSAL;
+
+   SHELL$MODULE_NAME    = 'XCPESUB';
+   SHELL$MODULE_SEGMENT = 'SETUP';
+
+   ITRC = ITSET ('LOCK','FATAL');
+   ITRC = ITSET ('TNF', 'FATAL');
+
+   DCL FIRST_PAGE                             BIT (1) INIT ('1'B),
+       EOF                                    BIT (1) INIT ('0'B),
+       PROPPRIC_FOUND                         BIT (1),
+       LINE                                   CHAR(80),
+       BUFFER                                 CHAR(512) VARYING,
+       REC_TYPE                               CHAR(3),  
+       PROPPRIC                               FILE,
+       OUTPUTE                                FILE PRINT,
+       SHLSUBS                                FILE,
+       PARMFILE                               FILE;
+
+   ON ENDFILE (PROPPRIC) EOF = '1'B;
+   ON UNDEFINEDFILE (PROPPRIC)  CALL FATAL_ERROR('PROGRAM',
+                                'PROPPRIC LOAD FILE NOT FOUND');
+   ON ENDPAGE (OUTPUTE) CALL HEADER;
+
+
+   ITRC = ITOPEN( 'PROPOSAL',ADDR(PROPOSAL_RECORD),
+                               'READ','','','');
+ 
+   %IF PREPROC$OPSYS = 'VMS'
+       %THEN %DO;
+          ITRC = ITOPEN('SUBSET  ', ADDR(PROPOSAL_RECORD), 'WRITE',
+                 '', '', 'TEMPLATE=PROPOSAL'||' LIBRARY=TEMPTABL');
+       %END;
+       %ELSE %DO;
+          OPEN FILE (SHLSUBS) RECORD SEQUENTIAL OUTPUT;
+       %END;
+
+   OPEN FILE (OUTPUTE)
+        PAGESIZE(INSTOPT_PAGESIZE_OUTPUT1);
+   RTFCA.PAGESIZE = INSTOPT_PAGESIZE_OUTPUT1;
+   PAGENO = 1;
+
+   CALL HEADER;
+
+   OPEN FILE (PROPPRIC) RECORD SEQUENTIAL INPUT;
+
+   OPEN FILE (PARMFILE) RECORD SEQUENTIAL OUTPUT;
+
+   LINE='PROPITEM=TEMPORARY';
+   WRITE FILE (PARMFILE) FROM (LINE);
+   LINE='FILE=PROPOSAL_FILE';
+   WRITE FILE (PARMFILE) FROM (LINE);
+
+   CLOSE FILE (PARMFILE);
+
+   DO WHILE (^EOF);
+    READ FILE (PROPPRIC) INTO (BUFFER);
+    IF LENGTH(BUFFER) &gt= 3
+       THEN REC_TYPE=SUBSTR(BUFFER,1,3);
+       ELSE REC_TYPE=BUFFER;
+    IF REC_TYPE = 'PRP' THEN
+     CALL GET_CONTID;
+   END;
+
+   PUT FILE (OUTPUTE) SKIP(2) EDIT
+             ('** PRELIMINARY SCAN OF LOAD FILE COMPLETED **')
+             (COL(44),A);
+
+   CLOSE FILE (OUTPUTE);
+   CLOSE FILE (PROPPRIC);
+
+   ITRC = ITCLOSE('PROPOSAL', ' ');
+
+   %IF PREPROC$OPSYS = 'VMS'
+       %THEN %DO;
+          ITRC = ITCLOSE('SUBSET', 'LIBRARY=TEMPTABL');
+       %END;
+       %ELSE %DO;
+          CLOSE FILE (SHLSUBS);
+       %END;
+
+ /*-----------------------------------------------------------------*/
+ /*        EXTRACT CONTID FROM PROPPRIC AND WRITE TO SHLSUBS        */
+ /*-----------------------------------------------------------------*/
+ GET_CONTID: PROC;
+    
+    DCL PROPKEY                        CHAR(15),
+        SAVE_SEGMENT                   CHAR(31),
+        MSG                            CHAR(300) VARYING,
+        LINE                           CHAR(80);
+
+    SAVE_SEGMENT = SHELL$MODULE_SEGMENT;
+    SHELL$MODULE_SEGMENT = 'GET_CONTID';
+
+    IF LENGTH(BUFFER) ^= 19
+       THEN DO;
+         MSG='PRP RECORD LENGTH IS INCORRECT.  RECORD IGNORED.';
+         PUT FILE (OUTPUTE) SKIP(2) EDIT
+             ('?','E',MSG)
+             (COL(1),A,COL(20),A,COL(27),A);
+         SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+         RETURN;
+       END;
+
+    PROPKEY=SUBSTR(BUFFER,5,15);
+    ITRC=ITREAD('PROPOSAL', PROPKEY, '0', '');
+     SELECT;
+      WHEN (ITRC = 12)
+       DO;
+        /*  THE RECORD IS LOCKED */
+        MSG='PROPOSAL RECORD IS LOCKED. PRICES FOR' ||
+              ' THIS PROPOSAL WILL NOT BE LOADED.';
+        PUT FILE (OUTPUTE) SKIP(2) EDIT
+         (PROPKEY,'E',MSG)
+         (COL(1),A,COL(20),A,COL(27),A);
+       END;
+      WHEN (ITRC = 8)
+       DO;
+        /*  NO RECORD IS FOUND */
+        MSG='PROPOSAL NOT FOUND. PRICES FOR THIS' ||
+              ' PROPOSAL WILL NOT BE LOADED.';
+        PUT FILE (OUTPUTE) SKIP(2) EDIT
+         (PROPKEY,'E',MSG)
+         (COL(1),A,COL(20),A,COL(27),A);
+       END;
+      WHEN (ITRC = 0)
+       DO;
+        %IF PREPROC$OPSYS = 'VMS'
+         %THEN %DO;
+           ITRC = ITWRITE('SUBSET','');
+         %END;
+         %ELSE %DO;
+           LINE=PROPKEY;
+           WRITE FILE (SHLSUBS) FROM (LINE);
+         %END;
+       END;
+      OTHERWISE;
+     END;
+
+    SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+               
+ END GET_CONTID;
+ /*------------------------------------------------------------------*/
+ /*                        PAGE HEADER                               */
+ /*------------------------------------------------------------------*/
+ HEADER:  PROC;
+
+   IF FIRST_PAGE
+      THEN FIRST_PAGE = '0'B;
+      ELSE DO;
+        PUT FILE (OUTPUTE) PAGE;
+        PAGENO = PAGENO + 1;
+      END;
+
+   RTFCA.PAGEPTR = ADDR(PAGENO);
+
+   CALL RTFEXEC (OUTPUTE, 'DDNAME=PXCPEA  ' || 'PAGESIZE=' ||
+                 TRIM(CHAR(INSTOPT_PAGESIZE_OUTPUT1)));
+
+ END HEADER;
+
+
+ END XCPESUB;
+
+
+
+
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

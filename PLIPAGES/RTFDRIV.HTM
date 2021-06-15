@@ -1,0 +1,1041 @@
+<HTML>
+<HEAD>
+<TITLE>@infile</TITLE>
+</HEAD>
+<BODY>
+<H1>@infile</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\\rtfdriv.pli"></A> /*==================================================================*/
+ /*                                                                  */
+ /*  RTFDRIV: GENERALIZED REPORT TEMPLATE DRIVER                     */
+ /*                                                                  */
+ /*  AUTHOR : RTD 2/1/93                                             */
+ /*                                                                  */
+ /*-------------------PROGRAM MODIFICATION HISTORY ------------------*/
+ /* PCGW    : 95/03/08                                               */
+ /*           CHANGED THE CONDITION FOR A VALID OPEN OF THE SUBSET   */
+ /*           FILE IN THE PROCEDURE OPEN_SUBSET_FILE.  ITRC=4 IS     */
+ /*           NOW VALID.  ALSO MADE THE SAME CHANGE IN OPEN_TABLES   */
+ /*           PROCEDURE FOR ITRC=4.                                  */
+ /*                                                                  */
+ /* RTD     : 95/05/16                                               */
+ /*           ADDED &quotRUNTIME_PARAMETERS_FILE&quot STATEMENT TO THE RTF   */
+ /*           DRIVER PARAMETER FILE.  THIS ALLOWS THE SPECIFICATION  */
+ /*           OF THE RTF PARMFILE TO BE PASSED TO RTF TO FEED THE    */
+ /*           TEMPLATE RUN-TIME PARAMETERS.  THIS FEATURE WAS ADDED  */
+ /*           TO SUPPORT THE CUSTOM REPORT FACILITY.  NOTE THAT THE  */
+ /*           RUNTIME_PARAMETERS_FILE STATEMENT MUST IMMEDIATELY     */
+ /*           FOLLOW THE SUBSET STATEMENT IF THERE IS A SUBSET       */
+ /*           STATEMENT.  IF THERE IS NOT A SUBSET STATEMENT, THE    */
+ /*           RUNTIME_PARAMETERS_FILE MUST BE THE FIRST NON-COMMENT  */
+ /*           STATEMENT IN THE PARAMETER FILE.  THE                  */
+ /*           RUNTIME_PARAMETERS_FILE STATEMENT IS OPTIONAL.         */
+ /*                                                                  */
+ /* RTD     : 95/05/26                                               */
+ /*           ADDED A CHECK TO MAKE SURE THAT THERE IS NOT A TABLE   */
+ /*           STATEMENT FOR THE SUBSET TABLE.                        */
+ /*                                                                  */
+ /*==================================================================*/
+
+ RTFDRIV: PROC OPTIONS (MAIN);
+
+   /*--- DEBUGGING SWITCH - SET TO &quotOFF&quot, &quotBRIEF&quot, OR &quotFULL&quot ---*/
+   %DECLARE DEBUGGING CHARACTER;
+   %DEBUGGING = 'OFF';
+   %INCLUDE BENVSTP; 
+   %INIT_TYPE = 'INTEGRATED'; 
+   %INCLUDE BTCSTUP;
+
+
+   SHELL$MODULE_NAME    = 'RTFDRIV';
+   SHELL$MODULE_SEGMENT = 'SETUP';
+
+   ITRC = ITSET ('LOCK','FATAL');
+   ITRC = ITSET ('TNF' ,'FATAL');
+
+   DCL PARMFILE                       FILE,
+       PARMFILE_LINE_NUMBER           FIXED BIN (15) INIT (0),
+       EOF_PARMFILE                   BIT  (1) INIT ('0'B),
+       PARM_BUFFER                    CHAR (80) VARYING,
+       PARAMETER                      CHAR (80) VARYING,
+       PARAMETER_VALUE                CHAR (80) VARYING,
+       SUBSET_NAME                    CHAR (8) INIT (' '),
+       RUNTIME_PARAMETERS_FILE        CHAR (8) INIT (' '),
+       RECORD_BUFFER                  CHAR (2024) BASED,
+       SELECT_ALL                     BIT  (1)  INIT('0'B),
+       SKIPPING_COMMENTS              BIT  (1) INIT ('1'B);
+
+
+   /*----------------------------------------------------------------*/
+   /*           GLOBAL INFORMATION ABOUT THE CURRENT TEMPLATE        */
+   /*----------------------------------------------------------------*/
+
+   DCL TEMPLATE_NAME              CHAR(8),
+       OUTPUT_NAME                CHAR(8),
+       PAGESIZE                   CHAR(5),
+       FILETYPE                   CHAR(10);
+
+   DCL (T,TABLE_LIST_TOP)         POINTER;
+
+   DCL 1 TABLE_NODE               BASED, 
+         2 TABLE_NAME             CHAR(17),
+         2 NEXT_PTR               POINTER;
+
+
+   /*----------------------------------------------------------------*/
+   /*                      OPEN PARAMETER FILE                       */
+   /*----------------------------------------------------------------*/
+
+   ON ENDFILE (PARMFILE) EOF_PARMFILE = '1'B;
+
+   OPEN FILE (PARMFILE) RECORD SEQUENTIAL INPUT;
+
+
+   /*----------------------------------------------------------------*/
+   /*          SKIP COMMENTS AT THE TOP OF THE PARAMETER FILE        */
+   /*----------------------------------------------------------------*/
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('SKIPPING COMMENT LINES...');
+       %END;
+
+   READ FILE (PARMFILE) INTO (PARM_BUFFER);
+   IF ^EOF_PARMFILE
+      THEN PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;
+
+   DO WHILE (^EOF_PARMFILE &amp SKIPPING_COMMENTS);
+      IF SUBSTR(PARM_BUFFER,1,1) ^= '*'
+         THEN
+           SKIPPING_COMMENTS = '0'B;
+         ELSE DO;
+           READ FILE (PARMFILE) INTO (PARM_BUFFER);
+           IF ^EOF_PARMFILE
+              THEN PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;
+         END;
+   END;
+
+
+   /*--- IF END OF FILE REACHED, NO COMMAND STATEMENTS WERE ---*/
+   /*--- FOUND.  OTHERWISE, PARM_BUFFER CONTAINS THE FIRST  ---*/
+   /*--- COMMAND STATEMENT IN THE PARMFILE.                 ---*/
+   IF EOF_PARMFILE &amp SKIPPING_COMMENTS
+      THEN CALL FATAL_ERROR ('PROGRAM',
+                      'NO COMMAND STATEMENTS FOUND IN PARAMETER FILE');
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('COMMENT LINES SKIPPED.');
+       %END;
+
+
+
+   /*----------------------------------------------------------------*/
+   /*  CHECK FOR SUBSET STATEMENT.  IF FOUND, OPEN THE SUBSET SO     */
+   /*  THAT IT CAN BE USED FOR ALL TEMPLATES.  THEN READ THE NEXT    */
+   /*  PARMFILE RECORD TO PRIME THE MAIN PROCESSING LOOP BELOW.      */
+   /*----------------------------------------------------------------*/
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('PREPARING SUBSET FILE IF AVAILABLE...');
+       %END;
+
+   CALL PARSE_PARM_BUFFER (PARM_BUFFER, PARAMETER, PARAMETER_VALUE);
+
+   IF PARAMETER = 'SUBSET'
+      THEN DO;
+        SUBSET_NAME = PARAMETER_VALUE;
+        CALL OPEN_SUBSET_FILE;
+        READ FILE (PARMFILE) INTO (PARM_BUFFER);
+        IF ^EOF_PARMFILE
+           THEN PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;
+      END;
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('PREPARATION OF SUBSET FILE COMPLETED.');
+       %END;
+
+
+
+   /*----------------------------------------------------------------*/
+   /*  CHECK FOR RUNTIME_PARAMETERS_FILE STATEMENT.  IF FOUND, SAVE  */
+   /*  THE VALUE IN THE GLOBAL VARIABLE.  THEN READ THE NEXT         */
+   /*  PARMFILE RECORD TO PRIME THE MAIN PROCESSING LOOP BELOW.      */
+   /*----------------------------------------------------------------*/
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('SCANNING FOR RUNTIME_PARAMETERS_FILE ' ||
+                         'STATEMENT...');
+       %END;
+
+   CALL PARSE_PARM_BUFFER (PARM_BUFFER, PARAMETER, PARAMETER_VALUE);
+
+   IF PARAMETER = 'RUNTIME_PARAMETERS_FILE'
+      THEN DO;
+        RUNTIME_PARAMETERS_FILE = PARAMETER_VALUE;
+        READ FILE (PARMFILE) INTO (PARM_BUFFER);
+        IF ^EOF_PARMFILE
+           THEN PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;
+        %IF DEBUGGING ^= 'OFF'
+            %THEN %DO;
+               PUT SKIP LIST ('RUNTIME_PARAMETERS_FILE IS ' ||
+                              TRIM(RUNTIME_PARAMETERS_FILE) || '.');
+            %END;
+      END;
+      ELSE DO;
+        RUNTIME_PARAMETERS_FILE = ' ';
+        %IF DEBUGGING ^= 'OFF'
+            %THEN %DO;
+               PUT SKIP LIST ('NO RUNTIME_PARAMETERS_FILE SPECIFIED.');
+            %END;
+      END;
+
+
+
+   /*----------------------------------------------------------------*/
+   /*                 MAIN TEMPLATE PROCESSING LOOP                  */
+   /*                                                                */
+   /*  FOR EACH TEMPLATE, READ AND VERIFY THE TEMPLATE PARAMETERS,   */
+   /*  SET UP THE ENVIRONMENT FOR RTFEXEC CALL, AND CALL RTFEXEC.    */
+   /*----------------------------------------------------------------*/
+
+   DO WHILE (^EOF_PARMFILE);
+
+      CALL LOAD_TEMPLATE_PARAMETERS;
+
+      %IF DEBUGGING ^= 'OFF'
+          %THEN %DO;
+             CALL DUMP_TEMPLATE_PARAMETERS;
+          %END;
+
+      CALL RUN_TEMPLATE;
+
+      CALL FREE_TABLE_LIST;
+
+   END; /* MAIN TEMPLATE_PROCESSING LOOP */
+
+   CLOSE FILE (PARMFILE);
+
+   IF SUBSET_NAME ^= ' '
+      THEN CALL CLOSE_SUBSET_FILE;
+
+
+
+ /*==================================================================*/
+ /*                                                                  */
+ /*                     LOAD_TEMPLATE_PARAMETERS                     */
+ /*                                                                  */
+ /* THIS PROCEDURE LOADS THE TEMPLATE PARAMETERS BY READING COMMAND  */
+ /* STATEMENTS FROM THE PARMFILE AND PARSING THEM.  THE PROCEDURE    */
+ /* ASSUMES THAT THE GLOBAL PARM_BUFFER VARIABLE ALREADY CONTAINS    */
+ /* THE &quotTEMPLATE=XXXXXXXX&quot STATEMENT FOR THE TEMPLATE AT THE TIME   */
+ /* THE PROCEDURE IS CALLED.                                         */
+ /*                                                                  */
+ /* THE PROCEDURE PERFORMS SYNTAX AND SEMANTIC CHECKING AS IT PARSES */
+ /* THE PARAMETERS.  ON SUCCESSFUL COMPLETION, THE FOLLOWING GLOBAL  */
+ /* DATA STRUCTURES ARE SET:                                         */
+ /*                                                                  */
+ /*     TEMPLATE_NAME                                                */
+ /*     OUTPUT_NAME                                                  */
+ /*     PAGESIZE                                                     */
+ /*     FILETYPE                                                     */
+ /*     LINKED LIST OF TABLE_NODE'S                                  */
+ /*     EOF_PARMFILE (IF EOF IS REACHED)                             */
+ /*                                                                  */
+ /* IN ADDITION, IF THE EOF WAS NOT REACHED ON THE PARMFILE, THE     */
+ /* PARM_BUFFER WILL CONTAIN THE &quotTEMPLATE=&quot STATEMENT FOR THE NEXT  */
+ /* TEMPLATE.                                                        */
+ /*                                                                  */
+ /*==================================================================*/
+
+ LOAD_TEMPLATE_PARAMETERS: PROC;
+
+   DCL PARAMETER        CHAR(80) VARYING,
+       PARAMETER_VALUE  CHAR(80) VARYING;
+
+
+   %IF DEBUGGING ^= 'OFF'
+       %THEN %DO;
+          PUT SKIP LIST ('LOADING TEMPLATE PARAMETERS...');
+       %END;
+
+
+   /*----------------------------------------------------------------*/
+   /*    PARSE THE TEMPLATE NAME OUT OF THE CURRENT PARM_BUFFER      */
+   /*----------------------------------------------------------------*/
+
+   CALL PARSE_PARM_BUFFER (PARM_BUFFER, PARAMETER, PARAMETER_VALUE);
+
+   IF PARAMETER ^= 'TEMPLATE'
+
+      THEN CALL FATAL_ERROR ('PROGRAM',
+              'INVALID PARAMETER FILE SYNTAX - KEYWORD &quot' ||
+              PARAMETER || '&quot ENCOUNTERED ON LINE ' ||
+              TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) ||
+              '.  &quotTEMPLATE&quot KEYWORD WAS EXPECTED.');
+
+   TEMPLATE_NAME = PARAMETER_VALUE;
+
+
+   /*----------------------------------------------------------------*/
+   /* LOOP THROUGH PARAMETER FILE, LOADING PARAMETERS UNTIL EOF OR   */
+   /* NEXT &quotTEMPLATE&quot STATEMENT IS REACHED.                          */
+   /*----------------------------------------------------------------*/
+
+   READ FILE (PARMFILE) INTO (PARM_BUFFER);
+   IF ^EOF_PARMFILE 
+      THEN DO;    
+        PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;  
+        CALL PARSE_PARM_BUFFER (PARM_BUFFER, PARAMETER,
+                                PARAMETER_VALUE); 
+      END;  
+
+   OUTPUT_NAME    = ' '; 
+   FILETYPE       = ' '; 
+   PAGESIZE       = ' '; 
+   TABLE_LIST_TOP = NULL;
+
+   DO WHILE (^EOF_PARMFILE &amp PARAMETER ^= 'TEMPLATE'); 
+
+      SELECT;  
+
+        WHEN (PARAMETER = 'OUTPUT')      
+          OUTPUT_NAME = PARAMETER_VALUE; 
+
+        WHEN (PARAMETER = 'PAGESIZE')   
+          IF ^IS_INTEGER (PARAMETER_VALUE)  
+             THEN CALL FATAL_ERROR ('PROGRAM',     
+                    'INVALID PAGESIZE &quot' || PARAMETER_VALUE || 
+                    '&quot FOR TEMPLATE ' || TRIM(TEMPLATE_NAME) ||   
+                    ' - INTEGER EXPECTED - PARAMETER FILE LINE ' ||   
+                    TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.'); 
+             ELSE      
+               PAGESIZE = PARAMETER_VALUE; 
+
+        WHEN (PARAMETER = 'FILETYPE')     
+          IF PARAMETER_VALUE ^= 'SEQUENTIAL' &amp 
+             PARAMETER_VALUE ^= 'PRINT'  
+             THEN CALL FATAL_ERROR ('PROGRAM',   
+                    'INVALID FILETYPE &quot' || PARAMETER_VALUE ||  
+                    '&quot - PARAMETER FILE LINE ' || 
+                    TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.'); 
+             ELSE    
+               FILETYPE = PARAMETER_VALUE;  
+
+        WHEN (PARAMETER = 'TABLE') 
+          DO;      
+            /*--- RTD  5/26/95 - ADDED CHECK TO MAKE SURE THAT THE ---*/
+            /*---                SUBSET TABLE IS NOT SPECIFIED     ---*/
+            /*---                WITH A TABLE STATEMENT            ---*/
+            IF SUBSET_NAME = PARAMETER_VALUE
+               THEN CALL FATAL_ERROR ('PROGRAM',   
+                    'A &quotTABLE&quot STATEMENT WAS FOUND FOR THE SUBSET' ||
+                    ' TABLE &quot' || TRIM(SUBSET_NAME) || 
+                    '&quot - PARAMETER FILE LINE ' || 
+                    TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.'); 
+
+            ALLOCATE TABLE_NODE SET (T); 
+            T-&gtTABLE_NODE.TABLE_NAME = PARAMETER_VALUE;  
+            T-&gtTABLE_NODE.NEXT_PTR   = TABLE_LIST_TOP;   
+            TABLE_LIST_TOP = T;  
+          END; 
+
+        WHEN (PARAMETER = 'SUBSET')  
+          CALL FATAL_ERROR ('PROGRAM',    
+               'SUBSET STATEMENT ENCOUNTERED AT '               ||    
+               'PARAMETER FILE LINE '                           || 
+               TRIM(CHARACTER(PARMFILE_LINE_NUMBER))            ||  
+               '.  IF USED, THE SUBSET STATEMENT MUST BE THE '  ||  
+               'FIRST STATEMENT FOLLOWING THE COMMENTS AT THE ' ||   
+               'BEGINNING OF THE PARAMETER FILE.');
+
+        WHEN (PARAMETER = 'RUNTIME_PARAMETERS_FILE')  
+          CALL FATAL_ERROR ('PROGRAM',    
+               'RUNTIME_PARAMETERS_FILE STATEMENT ENCOUNTERED AT '   ||    
+               'PARAMETER FILE LINE '                                || 
+               TRIM(CHARACTER(PARMFILE_LINE_NUMBER))                 ||  
+               '.  IF USED, THE RUNTIME_PARAMETERS_FILE STATEMENT '  ||
+               'MUST BE THE FIRST STATEMENT AFTER THE SUBSET '       ||
+               'AT THE BEGINNING OF THE PARAMETER FILE, OR, IF '     ||
+               'THERE IS NO SUBSET STATEMENT, THE '                  ||
+               'RUNTIME_PARAMETERS_FILE STATEMENT MUST BE THE FIRST '||
+               'STATEMENT FOLLOWING THE COMMENTS AT THE BEGINNING '  ||
+               'OF THE PARAMETER FILE.');
+
+        OTHERWISE  
+          CALL FATAL_ERROR ('PROGRAM',    
+               'UNRECOGNIZED KEYWORD &quot' || PARAMETER || 
+               '&quot - PARAMETER FILE LINE ' ||   
+               TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.');  
+
+      END; /* SELECT */    
+
+      READ FILE (PARMFILE) INTO (PARM_BUFFER); 
+      IF ^EOF_PARMFILE       
+         THEN DO;    
+           PARMFILE_LINE_NUMBER = PARMFILE_LINE_NUMBER + 1;
+           CALL PARSE_PARM_BUFFER (PARM_BUFFER, PARAMETER, 
+                                                PARAMETER_VALUE); 
+         END;  
+
+   END; /* TEMPLATE PARAMETER LOAD LOOP */
+
+
+   /*----------------------------------------------------------------*/
+   /*              CHECK FOR MISSING REQUIRED PARAMETERS             */
+   /*                                                                */
+   /* NOTE: TABLE PARAMETERS ARE NOT REQURIED.                       */
+   /*----------------------------------------------------------------*/
+
+   IF OUTPUT_NAME = ' '     
+      THEN CALL FATAL_ERROR ('PROGRAM',    
+           'NO OUTPUT SPECIFIED FOR TEMPLATE ' ||   
+           TRIM (TEMPLATE_NAME) || '.');    
+
+   IF PAGESIZE = ' '     
+      THEN CALL FATAL_ERROR ('PROGRAM',  
+           'NO PAGESIZE PARAMETER SPECIFIED FOR TEMPLATE ' || 
+           TRIM (TEMPLATE_NAME) || '.');
+
+   IF FILETYPE = ' '   
+      THEN CALL FATAL_ERROR ('PROGRAM', 
+           'NO FILETYPE PARAMETER SPECIFIED FOR TEMPLATE ' ||   
+           TRIM (TEMPLATE_NAME) || '.');  
+
+   %IF DEBUGGING ^= 'OFF'  
+       %THEN %DO; 
+          PUT SKIP LIST ('TEMPLATE PARAMETERS LOADED.');  
+       %END;  
+
+
+
+ /*------------------------------------------------------------------*/
+ /*                         IS_INTEGER                               */
+ /*                                                                  */
+ /* THIS FUNCTION RETURNS TRUE IF THE STRING CONTAINS ONLY DIGITS.   */
+ /* OTHERWISE, THE FUNCTION RETURNS FALSE.                           */
+ /*                                                                  */
+ /* NOTE: THIS PROCEDURE IS INTERNAL TO LOAD_TEMPLATE_PARAMETERS     */
+ /*------------------------------------------------------------------*/
+
+ IS_INTEGER: PROC (STRING) RETURNS (BIT(1)); 
+
+   DCL STRING         CHAR(*) VARYING,  
+       WORK_STRING    CHAR(80) VARYING,  
+       I              FIXED BIN (15),   
+       STRING_LENGTH  FIXED BIN (15),   
+       SAVE_SEGMENT   CHAR(31);     
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;      
+   SHELL$MODULE_SEGMENT = 'IS_INTEGER';   
+
+   %IF DEBUGGING = 'FULL'    
+       %THEN %DO;  
+          PUT SKIP LIST ('    VERIFYING INTEGER &quot' || STRING ||  
+                         '&quot...');  
+       %END;  
+
+   WORK_STRING = TRIM(STRING);  
+
+   STRING_LENGTH = LENGTH(WORK_STRING);  
+
+   IF STRING_LENGTH = 0 
+      THEN DO;      
+        SHELL$MODULE_SEGMENT = SAVE_SEGMENT;  
+        %IF DEBUGGING = 'FULL'   
+            %THEN %DO;  
+               PUT SKIP LIST ('    VERIFY OF INTEGER &quot' ||  
+                              STRING || '&quot FAILED.');  
+            %END;   
+        RETURN ('0'B);   
+      END; 
+
+   DO I = 1 TO STRING_LENGTH; 
+      IF INDEX ( '0123456789', SUBSTR(WORK_STRING,I,1) ) = 0 
+         THEN DO;    
+           SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+           %IF DEBUGGING = 'FULL'   
+               %THEN %DO;    
+                  PUT SKIP LIST ('    VERIFY OF INTEGER &quot' ||   
+                                 STRING || '&quot FAILED.'); 
+               %END;   
+           RETURN ('0'B);   
+         END; 
+   END;  
+
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;
+
+   %IF DEBUGGING = 'FULL'
+       %THEN %DO; 
+          PUT SKIP LIST ('    INTEGER &quot' || STRING ||  
+                         '&quot VERIFIED.'); 
+       %END;    
+
+   RETURN ('1'B);   
+
+ END IS_INTEGER;     
+
+
+ END LOAD_TEMPLATE_PARAMETERS;       
+
+
+
+ /*==================================================================*/
+ /*                                                                  */
+ /*                           RUN_TEMPLATE                           */
+ /*                                                                  */
+ /* USING THE INFORMATION LOADED FROM THE PARAMETER FILE, PERFORM    */
+ /* THE FOLLOWING STEPS:                                             */
+ /*                                                                  */
+ /*   1) OPEN THE SPECIFIED DATABASE FILES                           */
+ /*   2) OPEN THE OUTPUT FILE                                        */
+ /*   3) CALL THE RTFEXEC PROCEDURE                                  */
+ /*   4) CLOSE THE OUTPUT FILE                                       */
+ /*   5) CLOSE THE SPECIFIED DATABASE FILES                          */
+ /*                                                                  */
+ /*==================================================================*/
+
+ RUN_TEMPLATE: PROC;   
+
+   DCL RECORD_PTR       POINTER        INIT (NULL()),    
+       PAGE_NUMBER      FIXED BIN (15) INIT (1),   
+       PRINT_FILE       FILE PRINT,    
+       SEQUENTIAL_FILE  FILE,    
+       SAVE_SEGMENT     CHAR(31);    
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;   
+   SHELL$MODULE_SEGMENT = 'RUN_TEMPLATE';
+
+   %IF DEBUGGING ^= 'OFF'     
+       %THEN %DO;    
+          PUT SKIP LIST ('RUNNING TEMPLATE ' || TEMPLATE_NAME ||   
+                         '...');       
+       %END;      
+
+   ON ENDPAGE (PRINT_FILE);       
+
+   CALL OPEN_TABLES; 
+
+   %IF DEBUGGING ^= 'OFF'    
+       %THEN %DO;    
+          PUT SKIP LIST ('  CALLING RTFEXEC...');    
+       %END;     
+
+   RTFCA.PAGEPTR = ADDR(PAGE_NUMBER);     
+   RTFCA.PAGENUM = 1;     
+
+   IF FILETYPE = 'PRINT'   
+      THEN DO;   
+        OPEN FILE (PRINT_FILE)  
+             PAGESIZE (FIXED(PAGESIZE,15))
+             TITLE (OUTPUT_NAME);       
+        IF RUNTIME_PARAMETERS_FILE ^= ' '
+           THEN DO;
+             %IF DEBUGGING = 'FULL'    
+                 %THEN %DO;    
+                    PUT SKIP LIST ('  RTFEXEC OPTIONS=' ||
+                         'TEMPLATE='  || TRIM(TEMPLATE_NAME)  ||   
+                         ' PAGESIZE=' || TRIM(PAGESIZE)       ||
+                         ' PARMFILE=' || TRIM(RUNTIME_PARAMETERS_FILE)); 
+                 %END;     
+              CALL RTFEXEC (PRINT_FILE, 
+                         'TEMPLATE='  || TRIM(TEMPLATE_NAME)  ||   
+                         ' PAGESIZE=' || TRIM(PAGESIZE)       ||
+                         ' PARMFILE=' || TRIM(RUNTIME_PARAMETERS_FILE)); 
+           END;
+           ELSE DO;
+             %IF DEBUGGING = 'FULL'    
+                 %THEN %DO;    
+                    PUT SKIP LIST ('  RTFEXEC OPTIONS=' ||
+                           'TEMPLATE='  || TRIM(TEMPLATE_NAME)  ||   
+                           ' PAGESIZE=' || TRIM(PAGESIZE));
+                 %END;     
+             CALL RTFEXEC (PRINT_FILE, 
+                          'TEMPLATE='  || TRIM(TEMPLATE_NAME)  ||   
+                          ' PAGESIZE=' || TRIM(PAGESIZE));
+           END;
+        CLOSE FILE (PRINT_FILE);   
+      END;       
+      ELSE DO;    
+        OPEN FILE (SEQUENTIAL_FILE)   
+             RECORD SEQUENTIAL OUTPUT  
+             TITLE (OUTPUT_NAME);   
+        IF RUNTIME_PARAMETERS_FILE ^= ' '
+           THEN DO;
+             %IF DEBUGGING = 'FULL'    
+                 %THEN %DO;    
+                    PUT SKIP LIST ('  RTFEXEC OPTIONS=' ||
+                         'TEMPLATE='  || TEMPLATE_NAME  ||   
+                         ' OUTMODE=SEQUENTIAL'          ||
+                         ' PARMFILE=' || TRIM(RUNTIME_PARAMETERS_FILE));  
+                 %END;     
+             CALL RTFEXEC (SEQUENTIAL_FILE,
+                         'TEMPLATE='  || TEMPLATE_NAME  ||   
+                         ' OUTMODE=SEQUENTIAL'          ||
+                         ' PARMFILE=' || TRIM(RUNTIME_PARAMETERS_FILE));  
+           END;
+           ELSE DO;
+             %IF DEBUGGING = 'FULL'    
+                 %THEN %DO;    
+                    PUT SKIP LIST ('  RTFEXEC OPTIONS=' ||
+                          'TEMPLATE='  || TEMPLATE_NAME  ||   
+                          ' OUTMODE=SEQUENTIAL'             );
+                 %END;     
+             CALL RTFEXEC (SEQUENTIAL_FILE,
+                          'TEMPLATE='  || TEMPLATE_NAME  ||   
+                          ' OUTMODE=SEQUENTIAL'             );
+           END;
+        CLOSE FILE (SEQUENTIAL_FILE); 
+      END;   
+
+   %IF DEBUGGING ^= 'OFF'    
+       %THEN %DO;    
+          PUT SKIP LIST ('  RTFEXEC RETURN STATUS ' ||    
+                         CHARACTER(RTFCA.ERRCODE));   
+       %END;     
+
+
+   CALL CLOSE_TABLES;    
+
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;   
+
+   %IF DEBUGGING ^= 'OFF'     
+       %THEN %DO;   
+          PUT SKIP LIST ('RUN OF TEMPLATE ' || TEMPLATE_NAME ||   
+                         ' COMPLETED.');    
+       %END;    
+
+
+
+ /*------------------------------------------------------------------*/
+ /*                           OPEN_TABLES                            */
+ /*                                                                  */
+ /* THIS PROCEDURE OPENS THE TABLES SPECIFIED FOR THE TEMPLATE.      */
+ /*------------------------------------------------------------------*/
+
+ OPEN_TABLES: PROC; 
+
+   DCL T             POINTER,  
+       SAVE_SEGMENT  CHAR(31); 
+
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;  
+   SHELL$MODULE_SEGMENT = 'OPEN_TABLES'; 
+
+   %IF DEBUGGING ^= 'OFF'      
+       %THEN %DO;         
+          PUT SKIP LIST ('  OPENING DATABASE TABLES...');    
+       %END;      
+
+   T = TABLE_LIST_TOP;   
+   DO WHILE (T ^= NULL);    
+
+      %IF DEBUGGING = 'FULL'   
+          %THEN %DO; 
+             PUT SKIP LIST ('    OPENING DATABASE TABLE '  || 
+                            TRIM(T-&gtTABLE_NODE.TABLE_NAME) || '...');  
+          %END;  
+
+      ALLOCATE RECORD_BUFFER SET (RECORD_PTR); 
+                                                                                
+      ITRC = ITOPEN (T-&gtTABLE_NODE.TABLE_NAME,RECORD_PTR,                       
+                     'READ','','','');                                          
+                                                                                
+      /* ADDED BY PCGW ITRC ^= 4 CONDITION */
+      IF ITRC ^= 0 &amp ITRC ^= 4
+         THEN CALL FATAL_ERROR ('PROGRAM',                                      
+                'OPEN OF TABLE ' || TRIM(T-&gtTABLE_NODE.TABLE_NAME) ||           
+                ' FAILED FOR TEMPLATE ' || TRIM(TEMPLATE_NAME) ||               
+                ' (RC=' || TRIM(CHARACTER(ITRC)) || ').');                      
+                                                                                
+      %IF DEBUGGING = 'FULL'                                                    
+          %THEN %DO;                                                            
+             PUT SKIP LIST ('    OPEN OF DATABASE TABLE '  ||                   
+                            TRIM(T-&gtTABLE_NODE.TABLE_NAME) ||                   
+                            ' COMPLETED.');                                     
+          %END;                                                                 
+                                                                                
+      T = T-&gtTABLE_NODE.NEXT_PTR;                                               
+   END;                                                                         
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('  OPEN OF DATABASE TABLES COMPLETED.');               
+       %END;                                                                    
+                                                                                
+ END OPEN_TABLES;                                                               
+                                                                                
+                                                                                
+                                                                                
+ /*------------------------------------------------------------------*/         
+ /*                        CLOSE_TABLES                              */         
+ /*                                                                  */         
+ /* THIS PROCEDURE CLOSES THE SUBSET AND TABLES SPECIFIED FOR THE    */         
+ /* TEMPLATE.                                                        */         
+ /*                                                                  */         
+ /*------------------------------------------------------------------*/         
+                                                                                
+ CLOSE_TABLES: PROC;                                                            
+                                                                                
+   DCL T             POINTER,                                                   
+       SAVE_SEGMENT  CHAR(31);                                                  
+                                                                                
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;                                         
+   SHELL$MODULE_SEGMENT = 'CLOSE_TABLES';                                       
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('  CLOSING DATABASE TABLES...');                       
+       %END;                                                                    
+                                                                                
+   T = TABLE_LIST_TOP;                                                          
+   DO WHILE (T ^= NULL);                                                        
+                                                                                
+      %IF DEBUGGING = 'FULL'                                                    
+          %THEN %DO;                                                            
+             PUT SKIP LIST ('    CLOSING DATABASE TABLE '  ||                   
+                            TRIM(T-&gtTABLE_NODE.TABLE_NAME) || '...');           
+          %END;                                                                 
+                                                                                
+      ITRC = ITCLOSE (T-&gtTABLE_NODE.TABLE_NAME,'');                             
+                                                                                
+      IF ITRC ^= 0                                                              
+         THEN CALL FATAL_ERROR ('PROGRAM',                                      
+                   'CLOSE OF TABLE ' ||                                         
+                   TRIM(T-&gtTABLE_NODE.TABLE_NAME) ||                            
+                   ' FAILED FOR TEMPLATE ' || TRIM(TEMPLATE_NAME) ||            
+                   ' (RC=' || TRIM(CHARACTER(ITRC)) || ').');                   
+                                                                                
+      %IF DEBUGGING = 'FULL'                                                    
+          %THEN %DO;                                                            
+             PUT SKIP LIST ('    CLOSE OF DATABASE TABLE '  ||                  
+                            TRIM(T-&gtTABLE_NODE.TABLE_NAME) ||                   
+                            ' COMPLETED.');                                     
+          %END;                                                                 
+                                                                                
+      T = T-&gtTABLE_NODE.NEXT_PTR;                                               
+   END;                                                                         
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('  CLOSE OF DATABASE TABLES COMPLETED.');              
+       %END;                                                                    
+                                                                                
+                                                                                
+ END CLOSE_TABLES;                                                              
+                                                                                
+                                                                                
+ END RUN_TEMPLATE;                                                              
+                                                                                
+                                                                                
+                                                                                
+ /*==================================================================*/         
+ /*                                                                  */         
+ /*                           OPEN_SUBSET_FILE                       */         
+ /*                                                                  */         
+ /* THIS PROCEDURE OPENS THE SUBSET FILE.  THE &quot*&quot SELECT ALL        */         
+ /* TYPE OF SUBSET FILE IS SUPPORTED.                                */         
+ /*                                                                  */         
+ /*==================================================================*/         
+                                                                                
+ OPEN_SUBSET_FILE: PROC;                                                        
+                                                                                
+   DCL SUBSET_PTR    POINTER  INIT (NULL()),                                    
+       SAVE_SEGMENT  CHAR(31);                                                  
+                                                                                
+   SAVE_SEGMENT         = SHELL$MODULE_SEGMENT;                                 
+   SHELL$MODULE_SEGMENT = 'OPEN_SUBSET_FILE';                                   
+                                                                                
+   %IF DEBUGGING = 'FULL'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('  OPENING SUBSET...');                                
+       %END;                                                                    
+                                                                                
+   ALLOCATE RECORD_BUFFER SET (SUBSET_PTR);                                     
+                                                                                
+   CALL LOAD_SUBSET (SUBSET_NAME, SUBSET_PTR);                                  
+                                                                                
+   ITRC = ITOPEN ('SUBSET',SUBSET_PTR,'READ','','','LIBRARY=TEMPTABL');         
+   
+   /* ADDED BY PCGW ITRC ^= 4 CONDITION */
+   IF ITRC ^= 0 &amp ITRC ^= 4
+      THEN CALL FATAL_ERROR ('PROGRAM',                                         
+                'OPEN OF SUBSET ' || TRIM(SUBSET_NAME) ||                       
+                ' FAILED (RC=' || TRIM(CHARACTER(ITRC)) || ').');               
+                                                                                
+   ITRC = ITREAD ('SUBSET','','','');                                           
+                                                                                
+   IF ITRC = 0                                                                  
+      THEN DO;                                                                  
+        /*--- IF '*', &quotSELECT ALL&quot ACTION WAS TAKEN.  MAKE THE ---*/            
+        /*--- SUBSET FILE THE MASTER FILE.                     ---*/            
+        IF SUBSTR(SUBSET_PTR-&gtRECORD_BUFFER,1,1) = '*'                          
+           THEN DO;                                                             
+             SELECT_ALL = '1'B;                                                 
+             ITRC = ITCLOSE ('SUBSET','LIBRARY=TEMPTABL');                      
+             ITRC = ITOPEN  (SUBSET_NAME,SUBSET_PTR,'READ','','','');           
+             ITRC = ITSET   ('ALIAS','SUBSET IS ' || SUBSET_NAME);              
+           END;                                                                 
+      END;                                                                      
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+   %IF DEBUGGING = 'FULL'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('OPEN OF SUBSET COMPLETED.');                          
+       %END;                                                                    
+                                                                                
+ END OPEN_SUBSET_FILE;                                                          
+                                                                                
+                                                                                
+                                                                                
+ /*==================================================================*/         
+ /*                                                                  */         
+ /*                        CLOSE_SUBSET_FILE                         */         
+ /*                                                                  */         
+ /* THIS PROCEDURE CLOSES THE SUBSET FILE.  THE &quot*&quot SELECT ALL       */         
+ /* TYPE OF SUBSET FILE IS SUPPORTED.                                */         
+ /*                                                                  */         
+ /*==================================================================*/         
+                                                                                
+ CLOSE_SUBSET_FILE: PROC;                                                       
+                                                                                
+   DCL SAVE_SEGMENT  CHAR(31);                                                  
+                                                                                
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;                                         
+   SHELL$MODULE_SEGMENT = 'CLOSE_SUBSET_FILE';                                  
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('CLOSING SUBSET...');                                  
+       %END;                                                                    
+                                                                                
+   IF SELECT_ALL                                                                
+      THEN ITRC = ITCLOSE (SUBSET_NAME,'');                                     
+      ELSE ITRC = ITCLOSE ('SUBSET','LIBRARY=TEMPTABL');                        
+                                                                                
+   IF ITRC ^= 0                                                                 
+      THEN CALL FATAL_ERROR ('PROGRAM',                                         
+                'CLOSE OF SUBSET ' || TRIM(SUBSET_NAME) ||                      
+                ' FAILED (RC=' || TRIM(CHARACTER(ITRC)) || ').');               
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('CLOSE OF SUBSET COMPLETED.');                         
+       %END;                                                                    
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+ END CLOSE_SUBSET_FILE;                                                         
+                                                                                
+                                                                                
+                                                                                
+ /*==================================================================*/         
+ /*                                                                  */         
+ /*                          FREE_TABLE_LIST                         */         
+ /*                                                                  */         
+ /* THIS PROCEDURE FREES THE LINKED LIST OF TABLE_NODE'S POINTED TO  */         
+ /* BY TABLE_LIST_TOP.                                               */         
+ /*                                                                  */         
+ /*==================================================================*/         
+                                                                                
+ FREE_TABLE_LIST: PROC;                                                         
+                                                                                
+   DCL T             POINTER,                                                   
+       SAVE_SEGMENT  CHAR(31);                                                  
+                                                                                
+   SAVE_SEGMENT         = SHELL$MODULE_SEGMENT;                                 
+   SHELL$MODULE_SEGMENT = 'FREE_TABLE_LIST';                                    
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('FREEING TABLE LIST...');                              
+       %END;                                                                    
+                                                                                
+   DO WHILE (TABLE_LIST_TOP ^= NULL);                                           
+      T = TABLE_LIST_TOP-&gtTABLE_NODE.NEXT_PTR;                                  
+      FREE TABLE_LIST_TOP-&gtTABLE_NODE;                                          
+      TABLE_LIST_TOP = T;                                                       
+   END;                                                                         
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+   %IF DEBUGGING ^= 'OFF'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('FREEING OF TABLE LIST COMPLETED.');                   
+       %END;                                                                    
+                                                                                
+ END FREE_TABLE_LIST;                                                           
+                                                                                
+                                                                                
+                                                                                
+ /*------------------------------------------------------------------*/         
+ /*                       PARSE_PARM_BUFFER                          */         
+ /*                                                                  */         
+ /* THIS PROCEDURE EXTRACTS THE PARAMETER KEYWORD AND THE PARAMETER  */         
+ /* VALUE, ASSUMED TO BE SEPARATED BY AN &quot=&quot, FROM PARM_BUFFER.      */         
+ /*                                                                  */         
+ /* THE PROCEDURE CHECKS TO INSURE THAT THE STATEMENT HAS THE FORM:  */         
+ /* &quot&ltKEYWORD&gt=&ltVALUE&gt&quot.  A FATAL ERROR IS GENERATED IF THE          */         
+ /* STATEMENT IS NOT OF THE CORRECT FORM.                            */         
+ /*                                                                  */         
+ /* NOTE: THIS PROCEDURE IS INTERNAL TO LOAD_TEMPLATE_PARAMETERS     */         
+ /*------------------------------------------------------------------*/         
+                                                                                
+ PARSE_PARM_BUFFER: PROC (PARM_BUFFER, PARAMETER, PARAMETER_VALUE);             
+                                                                                
+   DCL PARM_BUFFER          CHAR(*) VARYING,                                    
+       PARAMETER            CHAR(*) VARYING,                                    
+       PARAMETER_VALUE      CHAR(*) VARYING,                                    
+       EQUAL_SIGN_POSITION  FIXED BIN (15),                                     
+       SAVE_SEGMENT         CHAR(31);                                           
+                                                                                
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;                                         
+   SHELL$MODULE_SEGMENT = 'PARSE_PARM_BUFFER';                                  
+                                                                                
+   %IF DEBUGGING = 'FULL'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('    PARSING PARM_BUFFER &quot' || PARM_BUFFER ||          
+                         '&quot...');                                               
+       %END;                                                                    
+                                                                                
+   /*----------------------------------------------------------------*/         
+   /*                     CHECK FOR NULL STATEMENT                   */         
+   /*----------------------------------------------------------------*/         
+                                                                                
+   IF PARM_BUFFER = ' '                                                         
+      THEN CALL FATAL_ERROR ('PROGRAM',                                         
+           'NULL STATEMENT ENCOUNTERED AT PARAMETER FILE LINE ' ||              
+           TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.');                       
+                                                                                
+                                                                                
+   /*----------------------------------------------------------------*/         
+   /*    VERIFY THAT PARM_BUFFER IS OF THE FORM &ltSTRING&gt=&ltSTRING&gt    */         
+   /*----------------------------------------------------------------*/         
+                                                                                
+   EQUAL_SIGN_POSITION = INDEX (PARM_BUFFER,'=');                               
+                                                                                
+   IF EQUAL_SIGN_POSITION = 0 |                                                 
+      EQUAL_SIGN_POSITION = LENGTH(PARM_BUFFER)                                 
+      THEN CALL FATAL_ERROR ('PROGRAM',                                         
+           'INVALID STATEMENT &quot' || PARM_BUFFER ||                              
+           '&quot - FORM &quot&ltKEYWORD&gt=&ltVALUE&gt&quot EXPECTED - ' ||                        
+           ' PARAMETER FILE LINE ' ||                                           
+           TRIM(CHARACTER(PARMFILE_LINE_NUMBER)) || '.');                       
+                                                                                
+                                                                                
+   /*----------------------------------------------------------------*/         
+   /*             EXTRACT THE PARAMETER KEYWORD AND VALUE            */         
+   /*----------------------------------------------------------------*/         
+                                                                                
+   PARAMETER = TRIM (SUBSTR(PARM_BUFFER,1,EQUAL_SIGN_POSITION-1) );             
+                                                                                
+   PARAMETER_VALUE = TRIM (SUBSTR(PARM_BUFFER,EQUAL_SIGN_POSITION+1) );         
+                                                                                
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+   %IF DEBUGGING = 'FULL'                                                       
+       %THEN %DO;                                                               
+          PUT SKIP LIST ('    PARSING OF PARM_BUFFER &quot' ||                      
+                         PARM_BUFFER || '&quot COMPLETED.');                        
+       %END;                                                                    
+                                                                                
+ END PARSE_PARM_BUFFER;                                                         
+                                                                                
+                                                                                
+                                                                                
+ /*==================================================================*/         
+ /*                                                                  */         
+ /*                    DUMP_TEMPLATE_PARAMETERS                      */         
+ /*                                                                  */         
+ /* THIS PROCEDURE DUMPS THE CURRENT VALUES IN THE FOLLOWING GLOBAL  */         
+ /* DATA STRUCTURES:                                                 */         
+ /*                                                                  */         
+ /*     TEMPLATE_NAME                                                */         
+ /*     OUTPUT_NAME                                                  */         
+ /*     SUBSET_NAME                                                  */         
+ /*     FILETYPE                                                     */         
+ /*     TABLE_NODE LINKED LIST                                       */         
+ /*                                                                  */         
+ /* THE INFORMATION IS DUMPED TO STANDARD OUTPUT.                    */         
+ /*                                                                  */         
+ /*==================================================================*/         
+                                                                                
+ DUMP_TEMPLATE_PARAMETERS: PROC;                                                
+                                                                                
+   DCL T             POINTER,                                                   
+       COUNT         FIXED BIN (15),                                            
+       BUFFER        CHAR(80) VARYING,                                          
+       SAVE_SEGMENT  CHAR(31);                                                  
+                                                                                
+   SAVE_SEGMENT = SHELL$MODULE_SEGMENT;                                         
+   SHELL$MODULE_SEGMENT = 'DUMP_TEMPLATE_PARAMETERS';                           
+                                                                                
+   PUT SKIP;                                                                    
+                                                                                
+   PUT SKIP EDIT ('TEMPLATE ' || TEMPLATE_NAME,                                 
+                  'OUTPUT='    || TRIM (OUTPUT_NAME) ||                         
+                  '  FILETYPE=' || TRIM (FILETYPE)    ||                        
+                  '  PAGESIZE=' || TRIM (PAGESIZE)       )                      
+                 (COL(1),A,COL(20),A);                                          
+                                                                                
+   IF TABLE_LIST_TOP = NULL                                                     
+      THEN BUFFER = 'TABLES: (NONE)';                                           
+      ELSE BUFFER = 'TABLES:';                                                  
+                                                                                
+   T     = TABLE_LIST_TOP;                                                      
+   COUNT = 0;                                                                   
+   DO WHILE (T ^= NULL);                                                        
+      BUFFER = BUFFER || ' ' || T-&gtTABLE_NODE.TABLE_NAME;                       
+      IF COUNT &lt 4                                                              
+         THEN                                                                   
+           COUNT = COUNT + 1;                                                   
+         ELSE DO;                                                               
+           PUT EDIT (BUFFER) (COL(20),A);                                       
+           PUT SKIP;                                                            
+           BUFFER = '       ';                                                  
+           COUNT = 0;                                                           
+         END;                                                                   
+      T = T-&gtTABLE_NODE.NEXT_PTR;                                               
+   END;                                                                         
+                                                                                
+   IF BUFFER ^= ' '                                                             
+      THEN DO;                                                                  
+        PUT EDIT (BUFFER) (COL(20),A);                                          
+        PUT SKIP;                                                               
+      END;                                                                      
+                                                                                
+   SHELL$MODULE_SEGMENT = SAVE_SEGMENT;                                         
+                                                                                
+ END DUMP_TEMPLATE_PARAMETERS;                                                  
+                                                                                
+                                                                                
+ END RTFDRIV;                                                                   
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+

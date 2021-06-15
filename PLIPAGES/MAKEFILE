@@ -1,0 +1,34 @@
+DEBUG = TRUE
+
+!IF "$(DEBUG)" == "TRUE"
+COPT = /c /W3 /AL /Od /Zip /nologo
+LOPT = /CO/NOLOGO/NOE/St:18000
+LIBS = GnuLibDR
+EXCP = rem
+!ELSE
+COPT = /c /W3 /AL /Ox /Grs /Zp /nologo
+LOPT = /E/F/PACKC/NOLOGO/NOE/St:18000
+LIBS = GnuLibOR
+EXCP = pklite -p
+!ENDIF
+
+
+PROG1 = plipages
+PROG2 = buildls2
+
+all : $(PROG1).exe $(PROG2).exe
+
+$(PROG1).obj : $(PROG1).c
+  cl $(COPT) $*.c
+
+$(PROG1).exe : $(PROG1).obj
+  link $* $(LOPT),,NUL,$(LIBS);
+  $(EXCP) $(@B).EXE
+
+
+$(PROG2).obj : $(PROG2).c
+  cl $(COPT) $*.c
+
+$(PROG2).exe : $(PROG2).obj
+  link $* $(LOPT),,NUL,$(LIBS);
+  $(EXCP) $(@B).EXE

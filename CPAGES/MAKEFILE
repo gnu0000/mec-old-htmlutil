@@ -1,0 +1,35 @@
+DEBUG = TRUE
+
+!IF "$(DEBUG)" == "TRUE"
+COPT = /c /W3 /AL /Od /Zip /nologo
+LOPT = /CO/NOLOGO/NOE/St:28000
+LIBS = GnuLibDR
+EXCP = rem
+!ELSE
+COPT = /c /W3 /AL /Ox /Grs /Zp /nologo
+LOPT = /E/F/PACKC/NOLOGO/NOE/St:28000
+LIBS = GnuLibOR
+EXCP = pklite -p
+!ENDIF
+
+
+PROG1 = MakeLink
+PROG2 = cpages
+PROG3 = buildidx
+
+all : $(PROG1).exe $(PROG2).exe $(PROG3).exe
+
+.c.obj:
+  cl $(COPT) $*.c
+
+$(PROG1).exe : $(PROG1).obj files.obj
+  link $* files $(LOPT),,NUL,$(LIBS);
+  $(EXCP) $(@B).EXE
+
+$(PROG2).exe : $(PROG2).obj files.obj buffers.obj
+  link $* files buffers $(LOPT),,NUL,$(LIBS);
+  $(EXCP) $(@B).EXE
+
+$(PROG3).exe : $(PROG3).obj files.obj buffers.obj
+  link $* files buffers $(LOPT),,NUL,$(LIBS);
+  $(EXCP) $(@B).EXE

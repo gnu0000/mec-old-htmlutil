@@ -1,0 +1,1541 @@
+<HTML>
+<HEAD>
+<TITLE>test\daemmas.pli</TITLE>
+</HEAD>
+<BODY>
+<H1>test\daemmas.pli</H1>
+<PRE>
+<HR>
+<EM>This page was updated on Tue Jan 14 </EM>
+<P>
+
+
+<A NAME="test\daemmas.pli"></A>/*============================================================================*/
+/*                                                                            */
+/*      DAEMMAS : Maintain Master Files                                       */
+/*                                                                            */
+/*      Screens Used : DMMAS01       - File Descriptor Scroll                 */
+/*                     DMMAS51       - File Descriptor Search                 */
+/*                     xxxxSM0       - File Scroll Screens                    */
+/*                                                                            */
+/*      Written By : CJB   02/24/87                                           */
+/*                                                                            */
+/*------------------------ Program Modification History ----------------------*/
+/*                                                                            */
+/*      Updated By : CJB   07/21/89                                           */
+/*                   changed number of available detail screens from 4 to 6   */
+/*                                                                            */
+/*      Updated By : BRL   12/26/89                                           */
+/*                   changed scroll screen names to production specifications */
+/*                                                                            */
+/*      Updated By : CJB &amp BRL  01/12/90                                      */
+/*                   forces a DPROPEST record to be added if a DPROPOSL       */
+/*                   record is added, and forces a DPROJEST record to be      */
+/*                   added if a DPROJECT record is added.                     */
+/*                   HNP 02/20/91 Changed DCONTEST references to DPROPEST.    */
+/*                                                                            */
+/*      Updated By : BRL 02/19/90                                             */
+/*                   added sample database screens.                           */
+/*============================================================================*/
+daemmas: proc options (main);
+
+  %include environment_dcls;
+  %form_library = 'DSAE';
+  %init_type    = 'INTEGRATED';
+  %include program_setup;
+
+  shell$module_name    = 'DAEMMAS';
+  shell$module_segment = 'SETUP';
+
+  call get_screen_group;
+
+  %include level_setup;
+  %include levelkeydcls;
+
+  scroll_form         = 'DMMAS01';
+  source_fileid       = 'FILEUSER';
+  reference_fileid    = 'FILEDESC';
+  num_detail_screens  = 0;
+  num_delete_screens  = 0;
+  source_keylevel     = 0;    
+  reference_keylevel  = 0;
+  power_add           = '0'b;
+  update              = '0'b;
+  abort               = '0'b;
+
+  dcl fileid           char (8),
+      (l,r,f)          pointer,
+      scroll_screen    char (40),
+      nest_level       fixed bin (15) init (0);
+
+  call process_screen_group (scroll_form,detail_forms,num_detail_screens,
+                             delete_forms,num_delete_screens);
+
+  on endfile (source) source_found = '0'b;
+  on key     (source) source_found = '0'b;
+
+  call load_file_descriptors (source_fileid,source_keylevel,
+                              filedesc_top,filedesc_end);
+  source_ptr = find_filedesc (filedesc_top,source_fileid);  
+
+  call load_file_descriptors (reference_fileid,reference_keylevel,
+                              filedesc_top,filedesc_end);
+  reference_ptr = find_filedesc (filedesc_top,reference_fileid);  
+
+  /*--- open reference file ---*/
+  open file (reference)
+       record keyed sequential input
+       title (reference_ptr -&gt filedesc_node.filename)
+       env   (shared_write);
+
+  /*--- open source file ---*/
+  open file (source)
+       record keyed sequential input
+       title (source_ptr -&gt filedesc_node.filename)
+       env   (shared_write);
+
+  /*--- Find File Descriptor Node for For File---*/
+  f = find_filedesc (filedesc_top,source_fileid);
+  r = find_recdesc  (f,'USERID  ');
+
+  /*--- Create Level Key Node ---*/
+  allocate level_key_node set (l);
+  l -&gt level_key_node.variable    = 'USERID  ';
+  l -&gt level_key_node.recdesc_ptr = r;
+  l -&gt level_key_node.next_ptr    = null;
+  l -&gt level_key_node.value       = shell$user_id;
+
+  /*--- Add Node to End of List ---*/
+  if level_key_top = null
+     then level_key_top = l;
+
+  /*--- initial read to see if file is empty ---*/
+  source_key    = shell$user_id; 
+  record_locked = '0'b;
+  source_found  = '1'b;
+  read file (source)
+       key  (source_key)
+       into (source_ptr -&gt filedesc_node.record)
+       options (match_greater_equal,
+                index_number(source_ptr -&gt filedesc_node.keylevel));
+
+  if ^level_key_matches (source_ptr,
+                         source_ptr -&gt filedesc_node.keylevel,
+                         level_key_top)
+     then source_found = '0'b; 
+
+  /*--- if file is empty, display message and return ---*/
+  if ^source_found 
+     then do;
+       close file (source);
+       terminator = 255;
+       do while (terminator ^= fdv$k_pf_4);
+          call msg ('No Files for User ID=' || shell$user_id || ' on File - ' ||
+                    'Press END Key to Return');
+          call fdv$wait(terminator);
+       end;
+       call fdv$clear;
+       return;
+     end;
+
+  select = 'A';
+  lock_selected_record = '0'b;
+  do while (select ^= ' ');
+
+     call scroll_routine (select, scroll_form, 'SINGLE', lock_selected_record,
+                          level_key_top, source, source_ptr, reference,
+                          reference_ptr, sel_save_top, scroll_context_ptr);
+     select;
+
+       when (select = 'S')
+         do;
+           fileid = get_file_field ('FILEUSER','FILEID',filedesc_top);
+        
+           if trim(fileid) = 'AFFILIAT' then scroll_screen = 'DAFLSM0';
+           if trim(fileid) = 'COUNTY'   then scroll_screen = 'DCTYSM0';
+           if trim(fileid) = 'DBIDDERS' then scroll_screen = 'DBDRSM0';
+           if trim(fileid) = 'DBIDTABS' then scroll_screen = 'DBTBSM0';
+           if trim(fileid) = 'DCONTRCT' then scroll_screen = 'DCONSM0';
+           if trim(fileid) = 'DCDBECOM' then scroll_screen = 'DCBESM0';
+           if trim(fileid) = 'DPDBECOM' then scroll_screen = 'DPBESM0';
+           if trim(fileid) = 'DPLNHOLD' then scroll_screen = 'DPLHSM0';
+           if trim(fileid) = 'DPRJCATG' then scroll_screen = 'DPCGSM0';
+           if trim(fileid) = 'DPRJFUND' then scroll_screen = 'DPFDSM0';
+           if trim(fileid) = 'DPRJITP'  then scroll_screen = 'DPIPSM0';
+           if trim(fileid) = 'DPRJITQ'  then scroll_screen = 'DPIQSM0';
+           if trim(fileid) = 'DPROJECT' then scroll_screen = 'DPRJSM0';
+           if trim(fileid) = 'DPROJEST' then scroll_screen = 'DPSTSM0';
+           if trim(fileid) = 'DPROPEST' then scroll_screen = 'DPETSM0';
+           if trim(fileid) = 'DPROPOSL' then scroll_screen = 'DPRPSM0';
+           if trim(fileid) = 'DPRPPROV' then scroll_screen = 'DPRVSM0';
+           if trim(fileid) = 'DSUBCONT' then scroll_screen = 'DSCTSM0';
+	   if trim(fileid) = 'DSUBITEM' then scroll_screen = 'DSITSM0';
+           if trim(fileid) = 'FACILITY' then scroll_screen = 'FACLSM0';
+           if trim(fileid) = 'FACMATLS' then scroll_screen = 'FACMSM0';
+           if trim(fileid) = 'ITEMLIST' then scroll_screen = 'DITLSM0';
+           if trim(fileid) = 'ITEMINDX' then scroll_screen = 'INDXSM0';
+           if trim(fileid) = 'LEGEND'   then scroll_screen = 'LGNDSM0';
+           if trim(fileid) = 'QUALIFY'  then scroll_screen = 'QUALSM0';
+           if trim(fileid) = 'NETWORK'  then scroll_screen = 'NTWKSM0';
+           if trim(fileid) = 'STATEMAP' then scroll_screen = 'STMPSM0';
+           if trim(fileid) = 'VENCLASS' then scroll_screen = 'DVCSSM0';
+           if trim(fileid) = 'VENDADDR' then scroll_screen = 'DVADSM0';
+           if trim(fileid) = 'VENDOFFR' then scroll_screen = 'DVOFSM0';
+           if trim(fileid) = 'VENDOR'   then scroll_screen = 'DVENSM0';
+           if trim(fileid) = 'SPLINK'   then scroll_screen = 'SPLINK_SCROLL';
+           if trim(fileid) = 'ORDER'    then scroll_screen = 'ORDER_SCROLL';
+           if trim(fileid) = 'PART'     then scroll_screen = 'PART_SCROLL';
+           if trim(fileid) = 'SUPPLIER' then scroll_screen = 'SUPPLIER_SCROLL';
+           if trim(fileid) = 'ORDERDTL' then scroll_screen = 'ORDERDTL_SCROLL';
+                      
+           /*--- close DSAE library ----*/
+           call fdv$lclos;
+
+           /*--- switch library channels to pull screens from DSS library ---*/
+           call fdv$lopen ('BAMS$DSS_FORM_LIBRARY',1);
+           
+           call file_level (fileid,scroll_screen);
+
+           /*--- close DSS form library ---*/
+           call fdv$lclos;
+
+           /*--- switch back to DSAE library ----*/
+           call fdv$lopen ('DSAE$FORM_LIBRARY',1);
+      
+           close file (source);
+           open file (source)
+                record keyed sequential input
+                title (source_ptr -&gt filedesc_node.filename)
+                env (shared_write);
+         end;
+
+       otherwise
+         do;
+           close file (reference);
+           close file (source);
+           call fdv$clear;
+           return;
+         end;
+     end;             
+  end;
+
+/*----------------------------------------------------------------------------*/
+/*                              File Level                                    */
+/*                                                                            */
+/*   This is a recursive routine to maintain a file and/or it's lower levels  */
+/*----------------------------------------------------------------------------*/
+file_level:  proc (fileid,scroll_form);
+
+  %include scroll_context_dcls;
+
+  dcl save_segment                   char (31),
+      (source_fileid,fileid,
+       variable,level_file,
+       level_variable,required_file) char (8),
+      (name,scroll_form)             char (40),
+      source                         file variable,
+      (source_file1,source_file2,
+       source_file3,source_file4,
+       source_file5,source_file6,
+       source_file7,source_file8,
+       source_file9,source_file10)   file,
+      (message,named_data)           char (80),
+      (buffer,temp_entire_key,
+       partial_key)                  char (80) varying,
+      (slash_pos,equal_pos,
+       dash_pos, comma_pos,
+       num_add_detail_screens,
+       num_look_detail_screens,
+       num_change_detail_screens,
+       num_delete_screens,
+       subscript, i,
+       source_keylevel)              fixed bin (15),
+      (read_access,write_access,
+       select)                       char (1),
+      (update,abort,power_add,
+       deleted_last,found,
+       adding_first_record,
+       lock_selected_record,
+       maintain_privilege,
+       upper_levels_ok)               bit (1),
+      (level_key_top,
+       sel_save_level_key_top,
+       sel_save_top,
+       del_save_top,
+       ref_desc_ptr,
+       reference_ptr,
+       v,value_top,value_end)        pointer init (null),
+      (bufdesc_top,bufdesc_end)      pointer external,
+      (add_detail_screen_tops(6),
+       change_detail_screen_tops(6),
+       look_detail_screen_tops(6),
+       delete_screen_tops(3),
+       m, p, bh, s_top, s_end, ptr)  pointer,
+     (display_record,source_key,
+       key)                          char (32767) varying,
+      scroll_context_ptr             pointer init (null) internal,
+      (source_ptr,f)                 pointer,
+      memory_2(2000)                 fixed bin (31) based (ptr),
+      memory_3(3000)                 fixed bin (31) based (ptr),
+      memory_5(5000)                 fixed bin (31) based (ptr),
+      memory_7(7000)                 fixed bin (31) based (ptr),
+      memory_9(9000)                 fixed bin (31) based (ptr),
+      memory_11(11000)               fixed bin (31) based (ptr),
+      (form_size, status)            fixed bin (31),
+      (null,length)                  builtin;
+
+  dcl 1 value_node       based,
+        2 value          char (1),
+        2 next_ptr       pointer;
+
+  dcl add_detail_forms(6)     char (40),
+      change_detail_forms(6)  char (40),
+      look_detail_forms(6)    char (40),
+      delete_forms(3)         char (40);
+  
+  dcl (l,l_top,l_end)          pointer;
+  dcl 1 next_level_node        based,
+        2 select               char (1),
+        2 fileid               char (8),
+        2 scroll_screen        char (40),
+        2 next_ptr             pointer;
+
+  dcl (d,d_top,d_end)          pointer;
+  dcl 1 delete_level_node      based,
+        2 delete_fileid        char (8),
+        2 root_fileid          char (8),
+        2 key                  char (512) varying,
+        2 next_ptr             pointer;
+
+  save_segment = shell$module_segment;
+  shell$module_segment = 'File_Level';
+
+  source_fileid       = fileid;
+  update              = '1'b;
+  abort               = '0'b;
+  power_add           = '1'b;
+
+  num_add_detail_screens    = 0;
+  num_look_detail_screens   = 0;
+  num_change_detail_screens = 0;
+  num_delete_screens        = 0;
+
+  add_detail_screen_tops(1) = null;
+  add_detail_screen_tops(2) = null;
+  add_detail_screen_tops(3) = null;
+  add_detail_screen_tops(4) = null;
+  add_detail_screen_tops(5) = null;
+  add_detail_screen_tops(6) = null;
+
+  change_detail_screen_tops(1) = null;
+  change_detail_screen_tops(2) = null;
+  change_detail_screen_tops(3) = null;
+  change_detail_screen_tops(4) = null;
+  change_detail_screen_tops(5) = null;
+  change_detail_screen_tops(6) = null;
+
+  look_detail_screen_tops(1) = null;
+  look_detail_screen_tops(2) = null;
+  look_detail_screen_tops(3) = null;
+  look_detail_screen_tops(4) = null;
+  look_detail_screen_tops(5) = null;
+  look_detail_screen_tops(6) = null;
+    
+  delete_screen_tops(1) = null;
+  delete_screen_tops(2) = null;
+  delete_screen_tops(3) = null;
+
+  if nest_level = 10
+     then call fatal_error ('PROGRAM','RECURSION ERROR - TOO MANY LEVELS ' ||
+                            'ATTEMPTED');
+  l_top = null;
+  l_end = null;
+  d_top = null;
+  d_end = null;
+
+  nest_level = nest_level + 1;
+
+  select;
+    when (nest_level = 1)
+      source = source_file1;
+    when (nest_level = 2)
+      source = source_file2;        
+    when (nest_level = 3)
+      source = source_file3;
+    when (nest_level = 4)
+      source = source_file4;
+    when (nest_level = 5)
+      source = source_file5;
+    when (nest_level = 6)
+      source = source_file6;
+    when (nest_level = 7)
+      source = source_file7;
+    when (nest_level = 8)       
+      source = source_file8;
+    when (nest_level = 9)
+      source = source_file9;
+    when (nest_level = 10)
+      source = source_file10;
+  end;
+
+  on endfile (source_file1)  source_found = '0'b;
+  on endfile (source_file2)  source_found = '0'b;
+  on endfile (source_file3)  source_found = '0'b;
+  on endfile (source_file4)  source_found = '0'b;
+  on endfile (source_file5)  source_found = '0'b;
+  on endfile (source_file6)  source_found = '0'b;
+  on endfile (source_file7)  source_found = '0'b;
+  on endfile (source_file8)  source_found = '0'b;
+  on endfile (source_file9)  source_found = '0'b;
+  on endfile (source_file10) source_found = '0'b;
+                               
+  on key     (source_file1)  source_found = '0'b;
+  on key     (source_file2)  source_found = '0'b;
+  on key     (source_file3)  source_found = '0'b;
+  on key     (source_file4)  source_found = '0'b;
+  on key     (source_file5)  source_found = '0'b;
+  on key     (source_file6)  source_found = '0'b;
+  on key     (source_file7)  source_found = '0'b;
+  on key     (source_file8)  source_found = '0'b;
+  on key     (source_file9)  source_found = '0'b;
+  on key     (source_file10) source_found = '0'b;
+
+  /*---- LOAD SCROLL SCREEN -------*/
+  call fdv$swksp (fmsworkcmn);
+
+  /*----- Read Form into Memory -------*/ 
+  bh = find_bufdesc_head (scroll_form);
+  if bh ^= null
+     then goto load_scroll_form;
+
+  allocate memory_2;
+                                    
+  call fdv$read (scroll_form,memory_2,2000,form_size);
+
+  status = fms_status();
+
+  if status ^= 1    
+     then do;
+       call msg ('NOT ACCESSIBLE THROUGH THIS FACILITY'); 
+       call fdv$wait (terminator);
+       nest_level = nest_level - 1;       
+       shell$module_segment = save_segment;
+       return;
+     end;
+
+  select; 
+    when  (form_size &lt 2000)
+      /* continue */;
+    when (form_size &gt 2000 &amp form_size &lt 3000)
+      do;
+        allocate memory_3;
+        call fdv$read (scroll_form,memory_3,3000,form_size);
+      end;     
+    when (form_size &gt 3000 &amp form_size &lt 5000)
+      do;
+        allocate memory_5;
+        call fdv$read (scroll_form,memory_5,5000,form_size);
+      end;     
+    when (form_size &gt 5000 &amp form_size &lt 7000)
+      do;
+        allocate memory_7;
+        call fdv$read (scroll_form,memory_7,7000,form_size);
+      end;     
+    when (form_size &gt 7000 &amp form_size &lt 9000)
+      do;
+        allocate memory_9;
+        call fdv$read (scroll_form,memory_9,9000,form_size);
+      end;     
+    when (form_size &gt 9000 &amp form_size &lt 11000)
+      do;
+        allocate memory_11;
+        call fdv$read (scroll_form,memory_11,11000,form_size);
+      end;     
+    otherwise
+      call fatal_error ('PROGRAM','FORM ' || scroll_form || ' (SIZE=' ||
+                        trim(character(form_size)) || 
+                        ' LARGER THAN MEMORY ALLOCATED');
+  end;
+
+  /*--- add form to buffer descriptor tree ---*/
+  allocate bufdesc_head_node set (bh);
+   
+  bh -&gt bufdesc_head_node.form_name          = scroll_form;
+  bh -&gt bufdesc_head_node.screen_bufdesc_top = null;
+  bh -&gt bufdesc_head_node.scroll_bufdesc_top = null;
+  bh -&gt bufdesc_head_node.next_ptr           = null;
+
+  if bufdesc_top = null
+     then bufdesc_top = bh;
+     else bufdesc_end -&gt bufdesc_head_node.next_ptr = bh;
+  bufdesc_end = bh;
+
+  load_scroll_form:
+
+  call load_form (scroll_form);
+
+  /*------- LOAD KEY LEVEL INFORMATION --------*/
+  call fdv$retdn ('LEVEL_INFO',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO LEVEL_INFO NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+  buffer    = trim(named_data);
+  equal_pos = index(buffer,'=');
+  source_keylevel = fixed(substr(buffer,equal_pos+1),15);
+  
+  call load_file_descriptors (source_fileid,source_keylevel,
+                              filedesc_top,filedesc_end);
+  source_ptr = find_filedesc (filedesc_top,source_fileid);  
+
+
+  /****************************************************************************/
+  /*                        LOAD ALL DETAIL FORMS                             */
+  /****************************************************************************/
+
+  /*----- load add detail screen names into add detail array ---------*/
+  call fdv$retdn ('ADD_FORMS',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO ADD_FORMS NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+
+  buffer = trim (named_data);
+  do while (buffer ^= ' ');
+
+     num_add_detail_screens = num_add_detail_screens + 1;
+     equal_pos = index (buffer,'=');
+     slash_pos = index (buffer,'/');
+
+     if slash_pos = 0
+        then do;
+          add_detail_forms(num_add_detail_screens) = 
+                           trim(substr(buffer,equal_pos+1));
+          buffer = ' ';
+        end;
+        else do;
+          add_detail_forms(num_add_detail_screens) = 
+                           substr(buffer,equal_pos+1,slash_pos-(equal_pos+1));
+          buffer = substr (buffer,slash_pos+1);
+        end;
+  end;
+
+  /*----- load change detail screen names into add detail array ---------*/
+  call fdv$retdn ('CHANGE_FORMS',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO CHANGE_FORMS NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+
+  buffer = trim (named_data);                                           
+  do while (buffer ^= ' ');
+
+     num_change_detail_screens = num_change_detail_screens + 1;
+     equal_pos = index (buffer,'=');
+     slash_pos = index (buffer,'/');
+
+     if slash_pos = 0
+        then do;
+          change_detail_forms(num_change_detail_screens) = 
+                           trim(substr(buffer,equal_pos+1));
+          buffer = ' ';
+        end;
+        else do;
+          change_detail_forms(num_change_detail_screens) = 
+                           substr(buffer,equal_pos+1,slash_pos-(equal_pos+1));
+          buffer = substr (buffer,slash_pos+1);
+        end;
+  end;
+
+  /*----- load look detail screen names into add detail array ---------*/
+  call fdv$retdn ('LOOK_FORMS',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO LOOK_FORMS NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+                    
+  buffer = trim (named_data);
+  do while (buffer ^= ' ');
+
+     num_look_detail_screens = num_look_detail_screens + 1;
+     equal_pos = index (buffer,'=');
+     slash_pos = index (buffer,'/');
+
+     if slash_pos = 0
+        then do;
+          look_detail_forms(num_look_detail_screens) = 
+                           trim(substr(buffer,equal_pos+1));
+          buffer = ' ';
+        end;
+        else do;
+          look_detail_forms(num_look_detail_screens) = 
+                           substr(buffer,equal_pos+1,slash_pos-(equal_pos+1));
+          buffer = substr (buffer,slash_pos+1);
+        end;
+  end;
+
+  /*-------------- load delete screen names into delete array ---------*/
+  call fdv$retdn ('DELETE_FORMS',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO DELETE_FORMS NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+
+  buffer = trim (named_data);
+  do while (buffer ^= ' ');
+
+     num_delete_screens = num_delete_screens + 1;
+
+     equal_pos = index (buffer,'=');
+     slash_pos = index (buffer,'/');
+
+     if slash_pos = 0
+        then do;
+          delete_forms(num_delete_screens) = trim(substr(buffer,equal_pos+1));
+          buffer = ' ';
+        end;
+        else do;                                                              
+          delete_forms(num_delete_screens) = 
+                       substr(buffer,equal_pos+1,slash_pos-(equal_pos+1));
+          buffer = substr (buffer,slash_pos+1);
+        end;
+  end;
+
+/***************************************************************************/
+/*                ALL FORMS ARRAYS ARE LOADED AT THIS POINT                */
+/***************************************************************************/
+
+  /*--- LOAD SELECT VALUES ---*/
+  call fdv$retdn ('SELECT_VALUES',named_data);
+  if named_data = ' '
+     then call fatal_error ('PROGRAM','NO SELECT_VALUES NAMED DATA FOUND ON ' ||
+                            'SCROLL FORM=' || trim(scroll_form));
+
+  value_top = null;
+  value_end = null;
+
+  buffer = trim(named_data);
+  do while (buffer ^= '');
+ 
+     comma_pos = index(buffer,',');
+     if comma_pos = 0
+        then do;
+          allocate value_node set (v);
+          v -&gt value_node.value    = substr (buffer,1,1);
+          v -&gt value_node.next_ptr = null;
+          if value_top = null
+             then value_top = v;
+             else value_end -&gt value_node.next_ptr = v;
+          value_end = v;
+          buffer = '';
+          goto end_select_values;
+        end;     
+
+     allocate value_node set (v);
+     v -&gt value_node.value    = substr(buffer,1,index(buffer,',')-1);
+     v -&gt value_node.next_ptr = null;
+     if value_top = null
+        then value_top = v;
+        else value_end -&gt value_node.next_ptr = v;
+     value_end = v;
+            
+     if buffer ^= ''
+        then buffer = substr(buffer,comma_pos+1);
+
+     end_select_values:
+
+  end;
+
+  /*----- LOAD LOWER LEVEL INFORMATION -------*/
+  subscript  = 1;
+  named_data = 'A';
+  do while (named_data ^= ' ');
+
+     name = 'NEXT_LEVEL_' || trim(character(subscript));
+     call fdv$retdn (name,named_data);
+     if named_data = ' '
+        then goto end_loop;
+
+     buffer = trim(named_data);
+     do while (buffer ^= '');
+
+        equal_pos = index (buffer,'=');
+        slash_pos = index (buffer,'/');
+        comma_pos = index (buffer,','); 
+        
+        allocate next_level_node set(l);
+
+        l -&gt next_level_node.select = substr(buffer,1,1);
+        l -&gt next_level_node.fileid = substr(buffer,3,comma_pos-3);
+        l -&gt next_level_node.next_ptr = null;
+
+        if slash_pos = 0
+           then l -&gt next_level_node.scroll_screen = 
+                     substr(buffer,comma_pos+1);
+           else l -&gt next_level_node.scroll_screen = 
+                     substr(buffer,comma_pos+1,slash_pos-(comma_pos+1));
+          
+        if l_top = null  
+           then l_top = l;
+           else l_end -&gt next_level_node.next_ptr = l;
+        l_end = l;
+
+        if slash_pos = 0
+           then buffer = '';
+           else buffer = substr(buffer,slash_pos+1);
+
+     end;
+     subscript = subscript + 1;
+     end_loop:
+  end;
+
+  /*------ CHECK LOWER DELETE LEVELS -----------*/
+  subscript  = 1;
+  named_data = 'A';
+  do while (named_data ^= ' ');
+
+     name = 'LOWER_DELETE_LEVELS_' || trim(character(subscript));
+     call fdv$retdn (name,named_data);
+     if named_data = ' '
+        then goto end_of_loop;
+
+     buffer = trim(named_data);
+     do while (buffer ^= '');
+
+        equal_pos = index (buffer,'=');
+        slash_pos = index (buffer,'/');
+        dash_pos  = index (buffer,'-');
+
+        allocate delete_level_node set(d);
+
+        d -&gt delete_level_node.delete_fileid = substr(buffer,1,equal_pos-1);
+        d -&gt delete_level_node.root_fileid   =
+                       substr(buffer,equal_pos+1,dash_pos-(equal_pos+1));
+        d -&gt delete_level_node.next_ptr = null;
+
+        if slash_pos = 0
+           then d -&gt delete_level_node.key = substr(buffer,dash_pos+1);
+           else d -&gt delete_level_node.key = 
+                       substr(buffer,dash_pos+1,slash_pos-(dash_pos+1));
+          
+        if d_top = null
+           then d_top = d;
+           else d_end -&gt delete_level_node.next_ptr = d;
+        d_end = d;
+
+        if slash_pos = 0
+           then buffer = '';
+           else buffer = substr(buffer,slash_pos+1);
+
+     end;     
+     subscript = subscript + 1;
+     end_of_loop:
+  end;
+
+  /*------ CHECK REQUIRED UPPER LEVELS ---------*/
+  upper_levels_ok = '1'b;
+  call fdv$retdn ('REQUIRED_UPPER_LEVELS',named_data);
+  if named_data = ' '
+     then goto load_level_key_vars;
+
+  /*--- return this value here while scroll screen is current screen ---*/
+  call fdv$retdn ('UPPER_LEVELS_UNAVAILABLE_MSG',message);
+
+  buffer = trim(named_data);
+  do while (buffer ^= '');
+     slash_pos = index (buffer,'/');
+     if slash_pos = 0
+        then do;
+          required_file = buffer;
+          buffer = '';
+        end;
+        else required_file = substr(buffer,1,slash_pos-1);
+
+     f = filedesc_top;
+     do while (f -&gt filedesc_node.fileid   ^= required_file &amp 
+               f -&gt filedesc_node.next_ptr ^= null);
+        f = f -&gt filedesc_node.next_ptr;
+     end;
+
+     if f = null | f -&gt filedesc_node.fileid ^= required_file
+        then do;
+          upper_levels_ok = '0'b;
+          buffer = '';
+        end;  
+
+     if buffer ^= ''
+        then buffer = substr(buffer,slash_pos+1);
+  end;
+
+
+  load_level_key_vars:
+
+  /*------- LOAD LEVEL KEY VARIABLES --------*/
+  /*------- assume one file specified per named data line --------*/
+  subscript  = 1;
+  named_data = 'A';
+  do while (named_data ^= ' ');
+
+     name = 'LEVEL_KEY_VAR_' || trim(character(subscript));
+     call fdv$retdn (name,named_data);
+     if named_data = ' '
+        then goto end_of_the_loop;
+
+     buffer = trim(named_data);
+     if buffer ^= ''
+        then do;
+          equal_pos  = index(buffer,'=');
+          level_file = substr(buffer,1,equal_pos-1);
+
+          f = filedesc_top;
+          do while (f -&gt filedesc_node.fileid   ^= level_file &amp 
+                    f -&gt filedesc_node.next_ptr ^= null);
+             f = f -&gt filedesc_node.next_ptr;
+          end;
+
+          if (f = null | f -&gt filedesc_node.fileid ^= level_file) 
+              &amp ^upper_levels_ok
+             then goto next_var;
+
+          buffer = substr(buffer,equal_pos+1);
+         
+          do while (buffer ^= '');        
+   
+             comma_pos = index(buffer,',');
+
+             if comma_pos = 0
+                then level_variable = substr(buffer,1);
+                else level_variable = substr(buffer,1,comma_pos-1);
+
+             call define_level_key_variable (level_file,fileid,level_variable,
+                                             level_key_top,filedesc_top);
+
+             if comma_pos = 0
+                then buffer = '';
+                else buffer = substr(buffer,comma_pos+1);
+          end;
+        end;
+     next_var:
+     subscript = subscript + 1;
+     end_of_the_loop:
+  end;
+
+ 
+  /*--- LOAD ALL DETAIL AND DELETE FORMS INTO MEMORY ---*/
+  /*--- load add detail forms into memory ---*/
+  do i = 1 to num_add_detail_screens;
+     call get_form  (add_detail_forms(i));
+     call load_form (add_detail_forms(i));
+  end;
+  /*--- load change detail forms into memory ---*/
+  do i = 1 to num_change_detail_screens;
+     call get_form  (change_detail_forms(i));
+     call load_form (change_detail_forms(i));
+  end;
+  /*--- load look detail forms into memory ---*/
+  do i = 1 to num_look_detail_screens;
+     call get_form  (look_detail_forms(i));
+     call load_form (look_detail_forms(i));
+  end;
+  /*--- load delete detail forms into memory ---*/
+  do i = 1 to num_delete_screens;
+     call get_form  (delete_forms(i));
+     call load_form (delete_forms(i));
+  end;
+
+  /*--- determine if user has privilege to maintain this file ---*/
+  found = '0'b;
+  v = value_top;
+  do while (v ^= null &amp ^found);
+     select;
+       when (v -&gt value_node.value = 'A')
+         found = '1'b;
+       when (v -&gt value_node.value = 'C')
+         found = '1'b;
+       when (v -&gt value_node.value = 'D')
+         found = '1'b;
+       otherwise;
+     end;
+     v = v -&gt value_node.next_ptr;
+  end;
+  
+  if found
+     then maintain_privilege = '1'b;
+     else maintain_privilege = '0'b;  
+
+  /*--- open source file ---*/
+  open file (source)
+       record keyed sequential input
+       title (source_ptr -&gt filedesc_node.filename)
+       env   (shared_write);
+
+  /*--- initial read to see if file is empty ---*/
+  source_key = make_level_key (source_ptr,level_key_top);
+
+  record_locked = '0'b;
+  source_found  = '1'b;
+  read file (source)
+       key  (source_key)
+       into (source_ptr -&gt filedesc_node.record)
+       options (match_greater_equal,
+                index_number(source_ptr -&gt filedesc_node.keylevel));
+  
+  if ^level_key_matches (source_ptr,
+                         source_ptr -&gt filedesc_node.keylevel,
+                         level_key_top)
+     then source_found = '0'b;
+
+  /*--- this code will keep the user from adding or changing ---*/
+  /*--- PES or LAS master file information                   ---*/
+  if ^maintain_privilege
+     then do; 
+       close file (source);
+       call msg ('NO RECORDS FOUND FOR SELECTED FILE');
+       call fdv$wait (terminator);
+       call clean_up_before_return;
+       call fdv$clear;
+       shell$module_segment = save_segment;
+       return;
+     end;
+  
+  /*--- will display if upper level file is not present ---*/
+  if ^source_found &amp ^upper_levels_ok
+     then do; 
+       close file (source);
+       call msg (message);    /*-- contains upper level unavailable msg --*/
+       call fdv$wait (terminator);
+       call clean_up_before_return;
+       call fdv$clear;
+       shell$module_segment = save_segment;
+       return;
+     end;
+
+  /*--- if file is empty, go into add immediately ---*/
+  if ^source_found 
+     then do;
+       close file (source);
+       open file (source)
+            record keyed sequential update 
+            title (source_ptr -&gt filedesc_node.filename)
+            env   (shared_write);
+
+       adding_first_record = '1'b;
+
+       if source_key = ' '
+          then display_record = copy (' ',source_ptr -&gt filedesc_node.lrecl);
+          else display_record = source_key || 
+           copy (' ',(source_ptr -&gt filedesc_node.lrecl-length(source_key)));
+
+       call add_routine (source, source_ptr, display_record,
+                         level_key_top, num_add_detail_screens,
+                         add_detail_screen_tops, add_detail_forms, update,
+                         adding_first_record, power_add, abort);
+       close file (source);
+
+       if abort
+          then do;
+            call clean_up_before_return;
+            call fdv$clear;
+            shell$module_segment = save_segment;
+            return;
+          end;
+       open file (source)
+            record keyed sequential input
+            title (source_ptr -&gt filedesc_node.filename)
+            env (shared_write);
+      end;
+
+  /*----- determine read and write access for current file -----*/
+  write_access = get_file_field ('FILEUSER','FUWRITE',filedesc_top);
+  read_access  = get_file_field ('FILEUSER','FUREAD',filedesc_top);
+
+  lock_selected_record = '1'b;
+  select = 'A';
+  do while (select ^= ' ');
+
+      call scroll_routine (select, scroll_form, 'SINGLE', lock_selected_record,
+                           level_key_top, source, source_ptr,
+                           no_reference_file, reference_ptr, sel_save_top,
+                           scroll_context_ptr);
+
+      /*--- if user entered an option other than A,C,D,L ---*/
+      /*--- this determines whether or not to go to a    ---*/
+      /*--- lower level                                  ---*/
+      found = '0'b;
+      l = l_top;
+      do while (l ^= null &amp ^found);
+         if l -&gt next_level_node.select = select
+            then found = '1'b;
+            else l = l -&gt next_level_node.next_ptr;
+      end;
+
+      /*--- found will be '1' if proceeding to a lower level ---*/
+      /*--- upon return from lower level must skip to end of ---*/
+      /*--- scrolling loop to keep from popping back to the  ---*/
+      /*--- main procedure.                                  ---*/
+      if found
+         then do;
+           call file_level (l -&gt next_level_node.fileid,
+                            l -&gt next_level_node.scroll_screen);
+           goto scroll_again;
+         end;
+         
+      select;
+
+       when (select = 'A') 
+         do;
+           if ^upper_levels_ok
+              then do;
+                call fdv$retdn ('UPPER_LEVELS_UNAVAILABLE_MSG',message);
+                call msg (message);
+                call fdv$wait (terminator);
+                goto end_of_add;
+              end;
+
+           if write_access = 'Y'
+              then do;
+                key = make_level_key (source_ptr,level_key_top);
+                display_record = key || 
+                    copy (' ',(source_ptr -&gt filedesc_node.lrecl-length(key)));
+                call add_routine (source, source_ptr, display_record,
+                                  level_key_top, num_add_detail_screens, 
+                                  add_detail_screen_tops, add_detail_forms, 
+                                  update, adding_first_record, power_add,abort);
+
+                if abort 
+                   then goto end_of_add;
+
+                /*--- create DPROPEST record for added DPROPOSL record ---*/
+                if fileid = 'DPROPOSL'
+                   then begin;
+
+                     dcl dpropest         file,
+                         dpropest_key     char (15),
+                         dpropest_ptr     pointer;
+
+                     call load_file_descriptors ('DPROPEST',0,
+                                                 filedesc_top,filedesc_end);
+                     dpropest_ptr = find_filedesc(filedesc_top,'DPROPEST');  
+
+                     open file (dpropest)
+                          record keyed direct update
+                          env (shared_write);
+
+                     call copy_fields(source_ptr,dpropest_ptr,'1'b);
+
+                     dpropest_key = get_file_field
+                                    ('DPROPOSL','CONTID',filedesc_top);
+
+                     write file    (dpropest)
+                           keyfrom (dpropest_key)
+                           from    (dpropest_ptr-&gtfiledesc_node.record);
+
+                     close file (dpropest);
+                   end;
+
+                /*--- create DPROJEST record for added DPROJECT record ---*/
+                if fileid = 'DPROJECT'
+                   then begin;
+
+                     dcl dprojest                file,
+                         dprojest_contid_key     char (15),
+                         dprojest_pcn_key        char (13),
+                         dprojest_key            char (28),
+                         dprojest_ptr            pointer;
+
+                     call load_file_descriptors ('DPROJEST',0,
+                                                 filedesc_top,filedesc_end);
+                     dprojest_ptr = find_filedesc(filedesc_top,'DPROJEST');  
+
+                     open file (dprojest)
+                          record keyed direct update
+                          env (shared_write);
+
+                     call copy_fields(source_ptr,dprojest_ptr,'1'b);
+
+                     dprojest_contid_key = get_file_field
+                                           ('DPROJECT','CONTID',filedesc_top); 
+                     dprojest_pcn_key    =  get_file_field
+                                           ('DPROJECT','PCN',filedesc_top);
+
+                     dprojest_key = dprojest_contid_key || dprojest_pcn_key;
+
+                     write file    (dprojest)
+                           keyfrom (dprojest_key)
+                           from    (dprojest_ptr-&gtfiledesc_node.record);
+
+                     close file (dprojest);
+                   end;
+
+              end;
+              else do;
+                terminator = 255;
+                do while (terminator ^= fdv$k_pf_4);
+                   call msg ('YOU ARE NOT AUTHORIZED TO MAINTAIN THIS FILE ' ||
+                             '- PRESS END KEY TO CONTINUE');
+                   call fdv$wait (terminator);
+                end;
+              end;
+
+           end_of_add:
+           abort = '0'b;
+           close file (source);
+           open file (source)
+                record keyed sequential input
+                title (source_ptr -&gt filedesc_node.filename)
+                env (shared_write);
+         end;
+
+       when (select = 'C') 
+         do;                      
+           if ^upper_levels_ok
+              then do;
+                call fdv$retdn ('UPPER_LEVELS_UNAVAILABLE_MSG',message);
+                call msg (message);
+                call fdv$wait (terminator);
+                goto end_of_change;
+              end;
+
+           if write_access = 'Y'
+              then call change_routine (source, source_ptr, level_key_top, 
+                                        update, abort, 
+                                        num_change_detail_screens, 
+                                        change_detail_screen_tops, 
+                                        change_detail_forms);
+              else do;
+                terminator = 255;
+                do while (terminator ^= fdv$k_pf_4);
+                   call msg ('YOU ARE NOT AUTHORIZED TO MAINTAIN THIS FILE ' ||
+                             '- PRESS END KEY TO CONTINUE');
+                   call fdv$wait (terminator);
+                end;
+              end;
+
+           end_of_change:
+
+           close file (source);
+           open file (source)
+                record keyed sequential input
+                title (source_ptr -&gt filedesc_node.filename)
+                env (shared_write);
+         end;
+
+       when (select = 'L') 
+         do;                      
+           if read_access = 'Y'
+              then call look_routine (source_ptr, level_key_top, 
+                                      num_look_detail_screens, 
+                                      look_detail_screen_tops, 
+                                      look_detail_forms);
+              else do;
+                terminator = 255;
+                do while (terminator ^= fdv$k_pf_4);
+                   call msg ('YOU ARE NOT AUTHORIZED TO ACCESS THIS FILE ' ||
+                             '- PRESS END KEY TO CONTINUE');
+                   call fdv$wait (terminator);
+                end;
+              end;
+           close file (source);
+           open file (source)
+                record keyed sequential input
+                title (source_ptr -&gt filedesc_node.filename)
+                env (shared_write);
+         end;
+
+       when (select = 'D')
+         do;
+           if write_access = 'N'
+              then do;
+                terminator = 255;
+                do while (terminator ^= fdv$k_pf_4);
+                   call msg ('YOU ARE NOT AUTHORIZED TO MAINTAIN THIS FILE ' ||
+                             '- PRESS END KEY TO CONTINUE');
+                   call fdv$wait (terminator);
+                end;                                
+                goto end_of_delete;
+              end;
+
+           deleted_last = '0'b;
+           abort = '0'b;
+
+           /*--- if there are no lower levels to delete, update the ---*/ 
+           /*--- current file by deleting the current record        ---*/
+           /*--- if there are lower levels to delete, delete them   ---*/
+           /*--- before deleting the current level                  ---*/
+           if d_top = null
+              then update = '1'b;
+              else update = '0'b;
+
+           call delete_routine (source, source_ptr, level_key_top, update,
+                                abort, deleted_last, num_delete_screens,
+                                delete_screen_tops, delete_forms);
+
+           if abort
+              then goto end_of_delete;
+
+           d = d_top;
+           do while (d ^= null);
+
+              /*--- parse delete node key variable names to build key ---*/
+              /*--- at this point, if the key is PCN and CN the       ---*/
+              /*--- delete key will appear as PCN,CN                  ---*/
+
+              temp_entire_key = trim(d -&gt delete_level_node.key);
+
+              partial_key = '';
+              do while (temp_entire_key ^= '');
+                 comma_pos = index (temp_entire_key,',');
+                 if comma_pos = 0
+                    then do;
+                      variable = substr(temp_entire_key,1);
+                      temp_entire_key = '';
+                    end;
+                    else do;
+                      variable = substr(temp_entire_key,1,comma_pos-1);
+                      temp_entire_key = substr(temp_entire_key,comma_pos+1);
+                    end;
+                 partial_key = partial_key ||
+                          get_file_field (source_fileid,variable,filedesc_top);
+              end;
+
+              call delete_lower_levels;
+              d = d -&gt delete_level_node.next_ptr;  
+           end;
+
+           /*--- deletes current level if lower levels were deleted ---*/
+           if ^update
+              then do;
+                source_key = make_key (source_ptr-&gtfiledesc_node.record,
+                                       source_ptr,
+                                       source_ptr-&gtfiledesc_node.keylevel,
+                                       level_key_top);
+                delete file (source)
+                       key  (source_key);
+              end;
+
+           /*--- deleted last record ? ---*/
+           source_key = make_level_key (source_ptr,level_key_top);
+           record_locked = '0'b;
+           source_found  = '1'b;
+           read file (source)
+                key  (source_key)
+                into (source_ptr -&gt filedesc_node.record)
+                options (match_greater_equal,
+                         index_number(source_ptr -&gt filedesc_node.keylevel));
+
+           if ^level_key_matches (source_ptr,
+                                  source_ptr -&gt filedesc_node.keylevel,
+                                  level_key_top)
+              then source_found = '1'b;
+
+           if ^source_found
+              then deleted_last = '1'b;
+
+           if deleted_last &amp ^maintain_privilege
+              then do;
+                close file (source);
+                call clean_up_before_return;
+                call fdv$clear;
+                shell$module_segment = save_segment;
+                return;
+              end;
+
+           if deleted_last &amp ^upper_levels_ok
+              then do;
+                close file (source);
+                call fdv$retdn ('UPPER_LEVELS_UNAVAILABLE_MSG',message);
+                if message ^= ' '
+                   then do;
+                     call msg (message);
+                     call fdv$wait (terminator);
+                   end;
+                call clean_up_before_return;
+                call fdv$clear;
+                shell$module_segment = save_segment;
+                return;
+              end;
+        
+           /*--- if deleted last record - go immediately into add ---*/
+           if deleted_last
+              then do;
+                close file (source);
+                open file (source)
+                     record keyed sequential update
+                     title (source_ptr -&gt filedesc_node.filename)
+                     env (shared_write);
+                adding_first_record = '1'b;
+                display_record = source_key || 
+                  copy (' ',
+                       (source_ptr -&gt filedesc_node.lrecl-length(source_key)));
+                call add_routine (source, source_ptr, display_record, 
+                                  level_key_top, num_add_detail_screens, 
+                                  add_detail_screen_tops, add_detail_forms, 
+                                  update, adding_first_record, power_add,abort);
+                if abort
+                   then do;
+                     close file (source);
+                     call clean_up_before_return;
+                     call fdv$clear;
+                     shell$module_segment = save_segment;
+                     return;
+                   end;
+
+                /*--- create DPROPEST record for added DPROPOSL record ---*/
+                if fileid = 'DPROPOSL'
+                   then begin;
+
+                     dcl dpropest         file,
+                         dpropest_key     char (15),
+                         dpropest_ptr     pointer;
+
+                     call load_file_descriptors ('DPROPEST',0,
+                                                 filedesc_top,filedesc_end);
+                     dpropest_ptr = find_filedesc(filedesc_top,'DPROPEST');  
+
+                     open file (dpropest)
+                          record keyed direct update
+                          env (shared_write);
+
+                     call copy_fields(source_ptr,dpropest_ptr,'1'b);
+
+                     dpropest_key = get_file_field
+                                    ('DPROPOSL','CONTID',filedesc_top);
+
+                     write file    (dpropest)
+                           keyfrom (dpropest_key)
+                           from    (dpropest_ptr-&gtfiledesc_node.record);
+
+                     close file (dpropest);
+                   end;
+
+                /*--- create DPROJEST record for added DPROJECT record ---*/
+                if fileid = 'DPROJECT'
+                   then begin;
+
+                     dcl dprojest                file,
+                         dprojest_contid_key     char (15),
+                         dprojest_pcn_key        char (13),
+                         dprojest_key            char (28),
+                         dprojest_ptr            pointer;
+
+                     call load_file_descriptors ('DPROJEST',0,
+                                                 filedesc_top,filedesc_end);
+                     dprojest_ptr = find_filedesc(filedesc_top,'DPROJEST');  
+
+                     open file (dprojest)
+                          record keyed direct update
+                          env (shared_write);
+
+                     call copy_fields(source_ptr,dprojest_ptr,'1'b);
+
+                     dprojest_contid_key = get_file_field
+                                           ('DPROJECT','CONTID',filedesc_top); 
+                     dprojest_pcn_key    =  get_file_field
+                                           ('DPROJECT','PCN',filedesc_top);
+
+                     dprojest_key = dprojest_contid_key || dprojest_pcn_key;
+
+                     write file    (dprojest)
+                           keyfrom (dprojest_key)
+                           from    (dprojest_ptr-&gtfiledesc_node.record);
+
+                     close file (dprojest);
+                   end;
+
+              end;
+           end_of_delete:
+           update = '1'b;
+           abort  = '0'b;
+           close file (source);
+           open file (source)
+                record keyed sequential input
+                title (source_ptr -&gt filedesc_node.filename)
+                env (shared_write);
+         end;
+
+        otherwise
+          do;
+            close file (source);
+            call clean_up_before_return;
+            free scroll_context_ptr-&gtscroll_context_node;
+            call fdv$clear;
+            shell$module_segment = save_segment;
+            return;
+          end;   
+      end;
+
+     scroll_again:
+
+     close file (source);
+     open file (source)
+          record keyed sequential input
+          title (source_ptr -&gt filedesc_node.filename)
+          env (shared_write);
+  end;
+
+/*--------------------------------------------------------------------------*/
+/*                          Clean_Up_Before_Return                          */
+/*--------------------------------------------------------------------------*/
+clean_up_before_return:  proc;
+
+   dcl save_segment       char (31);
+
+   save_segment = shell$module_segment;
+   shell$module_segment = 'Clean_up_Before_Return';
+
+   /*--- This routine undefines any level key variables, frees the ---*/
+   /*--- buffer descriptors list as well as the head node for the  ---*/
+   /*--- buffer descriptor, deletes all current forms (delete,     ---*/ 
+   /*--- detail, and scroll) from memory, deletes the file         ---*/
+   /*--- descriptor node for the current file, frees both the      ---*/
+   /*--- lower level nodes and the lower delete level nodes and    ---*/
+   /*--- subtracts one from the current nesting level counter.     ---*/
+   /*--- Also frees the select value list that determines if the   ---*/
+   /*--- user has the privilege to maintain this file.             ---*/
+
+   call undefine_level_key_variables (level_key_top); 
+   call free_bufdesc(scroll_form);
+   call free_bufdesc_head(scroll_form);
+   call fdv$del (scroll_form);
+
+   do i = 1 to num_delete_screens;
+      call free_bufdesc (delete_forms(i));
+      call free_bufdesc_head (delete_forms(i));
+      call fdv$del (delete_forms(i));
+      delete_screen_tops(i) = null;
+   end;                   
+   do i = 1 to num_add_detail_screens;
+      call free_bufdesc (add_detail_forms(i));
+      call free_bufdesc_head (add_detail_forms(i));
+      call fdv$del (add_detail_forms(i));
+      add_detail_screen_tops(i) = null;
+   end;
+   do i = 1 to num_change_detail_screens;
+      call free_bufdesc (change_detail_forms(i));
+      call free_bufdesc_head (change_detail_forms(i));
+      call fdv$del (change_detail_forms(i));
+      change_detail_screen_tops(i) = null;
+   end;
+   do i = 1 to num_look_detail_screens;
+      call free_bufdesc (look_detail_forms(i));
+      call free_bufdesc_head (look_detail_forms(i));
+      call fdv$del (look_detail_forms(i));
+      look_detail_screen_tops(i) = null;
+   end;
+
+   call free_filedesc (filedesc_top,fileid);
+   call free_lists;
+   nest_level = nest_level - 1;
+
+   shell$module_segment = save_segment;
+
+end clean_up_before_return;
+
+/*--------------------------------------------------------------------------*/
+/*                           DELETE_LOWER_LEVELS                            */
+/*                                                                          */
+/*       Deletes any lower level file records specified on scroll form      */
+/*--------------------------------------------------------------------------*/
+delete_lower_levels:  proc;
+
+   dcl save_segment       char (31),
+       delete_file        file, 
+       delete_file_found  bit (1),
+       delete_file_ptr    pointer,
+       partial_keylength  fixed bin (15),
+       keylength          fixed bin (15),
+       delete_key         char (32767) varying,
+       buffer             char (32767) varying;
+
+   save_segment = shell$module_segment;
+   shell$module_segment = 'Delete_Lower_Levels';
+
+   call load_file_descriptors(d-&gtdelete_level_node.delete_fileid,0,
+                              filedesc_top,filedesc_end);
+   delete_file_ptr =         
+        find_filedesc(filedesc_top,d-&gtdelete_level_node.delete_fileid);
+
+   keylength = 
+      delete_file_ptr-&gtfiledesc_node.keylist_top-&gtkeyhead_node.keylength;
+
+   on endfile (delete_file) delete_file_found = '0'b;
+   on key     (delete_file) delete_file_found = '0'b;
+
+   open file (delete_file)
+        record keyed sequential update
+        title (delete_file_ptr-&gtfiledesc_node.filename)
+        env (shared_write);
+
+   partial_keylength = length(trim(partial_key));
+
+   delete_file_found = '1'b;   
+   read file (delete_file)
+        key  (partial_key)
+        into (buffer)
+        options (match_greater_equal);
+
+   do while (delete_file_found &amp 
+             substr(buffer,1,partial_keylength) = partial_key);
+
+      delete_key = substr(buffer,1,keylength);
+
+      delete file (delete_file)
+             key  (delete_key);
+
+      read file (delete_file)
+           into (buffer);
+
+   end;
+
+   close file (delete_file);
+
+   shell$module_segment = save_segment;
+
+end delete_lower_levels;
+
+/*----------------------------------------------------------------------------*/
+/*                              Free Lists                                    */
+/*----------------------------------------------------------------------------*/
+free_lists:  proc;
+
+   dcl save_segment             char (31);
+
+   save_segment = shell$module_segment;
+   shell$module_segment = 'Free_Lists';
+
+   do while (d_top ^= null);
+      d = d_top -&gt delete_level_node.next_ptr;
+      free d_top -&gt delete_level_node;
+      d_top = d;
+   end;
+
+   do while (l_top ^= null);
+      l = l_top -&gt next_level_node.next_ptr;
+      free l_top -&gt next_level_node;
+      l_top = l;
+   end;
+
+   do while (value_top ^= null);
+      v = value_top -&gt value_node.next_ptr;
+      free value_top -&gt value_node;
+      value_top = v;
+   end;
+
+   shell$module_segment = save_segment;
+
+end free_lists;
+
+end file_level;
+
+end daemmas;
+</PRE>
+<ONLINE>
+<HR>
+<A HREF="ebsindex.htm"><IMG SRC="/clipart/back.gif" ALIGN="MIDDLE" BORDER=0>
+EBSIndex</A><P>
+<A HREF="/index.htm"><IMG SRC="/clipart/home.gif" ALIGN="MIDDLE" BORDER=0>
+Network Home Page</A>
+<HR>
+<EM>
+Please send any comments or problems to
+<A HREF="mailto:webmaster@infotechfl.com">webmaster@infotechfl.com</A>
+</EM>
+</ONLINE>
+</BODY>
+</HTML>
+
